@@ -9,6 +9,8 @@ import { notifyKey } from '../rules/notify.js';
 import { prKey } from '../pr-key.js';
 import { notify } from '../notify/osascript.js';
 import type { Store } from '../store/db.js';
+import type { LinkedSession, PrimaryAction, SessionActions } from '../sessions/types.js';
+import type { StartPreview } from '../sessions/start.js';
 import type {
   BranchInput, Bucket, Classification, Config, PrInput,
 } from '../types.js';
@@ -25,6 +27,16 @@ export interface BoardItem extends Classification {
   role: 'author' | 'reviewer';
   isDraft: boolean;
   checkDot: 'fail' | 'pending' | 'pass' | 'none';
+  /** The PR's head branch; null when unknown. Sessions on that branch are linked to the PR. */
+  headRefName: string | null;
+  /** The head branch lives in a fork; its name is then no evidence about a local checkout. */
+  isCrossRepository: boolean;
+  /** Local Claude Code sessions working on this PR. Filled in by `attachSessions`. */
+  sessions: LinkedSession[];
+  /** A local clone is configured for this PR's repo, so a session can be started for it. */
+  canStartSession: boolean;
+  /** What "Start session" would create for this PR; null exactly when `canStartSession` is false. */
+  startPreview: StartPreview | null;
   /** Carried so the notify key can be recomputed after a verdict moves a bucket. */
   discordPostedAt: string | null;
 }
@@ -66,7 +78,17 @@ export interface Board {
   notifications: NotificationEvent[];
   /** Identifies the server process; event ids restart when it changes. */
   epoch: string;
+  /** Why Claude Code sessions could not be listed; null when they could or the feature is off. */
+  sessionsError: string | null;
+  /** Which session buttons the client may offer. */
+  sessionActions: SessionActions;
+  /** The session button each card puts first. */
+  primaryAction: PrimaryAction;
 }
+
+export const NO_SESSION_ACTIONS: SessionActions = {
+  openTerminal: false, openDesktop: false, startSession: false,
+};
 
 const ORDER: Bucket[] = [
   'blocked-mechanically', 'needs-your-response', 'ready-to-merge',
@@ -115,6 +137,11 @@ export function buildBoard(
     role,
     isDraft: pr.isDraft,
     checkDot: checkDot(pr.checks),
+    headRefName: pr.headRefName ?? null,
+    isCrossRepository: pr.isCrossRepository ?? false,
+    sessions: [],
+    canStartSession: false,
+    startPreview: null,
   });
 
   const items: BoardItem[] = prs.map((pr) => {
@@ -151,6 +178,9 @@ export function buildBoard(
     error: null,
     notifications: [],
     epoch: '',
+    sessionsError: null,
+    sessionActions: NO_SESSION_ACTIONS,
+    primaryAction: 'copy',
   };
   sortItems(board);
   countCourts(board);
@@ -194,8 +224,8 @@ export function createPoller(cfg: Config, store: Store): Poller {
       // Without the user's own PRs there is no board to build.
       if (ownResult.status === 'rejected') throw ownResult.reason;
       const prs = ownResult.value;
-      // No branch-to-PR correlation is asserted: the GraphQL query does not
-      // fetch headRefName, so there is nothing honest to match branches on.
+      // No branch-to-PR correlation is asserted for the local branch list;
+      // `headRefName` is carried on each item for session matching only.
       const branches = readBranches(cfg.repoPath, new Set<string>());
       const next = buildBoard(
         prs, branches, store, cfg, new Date(),
@@ -231,6 +261,9 @@ export function createPoller(cfg: Config, store: Store): Poller {
             error: message,
             notifications: [...log],
             epoch,
+            sessionsError: null,
+            sessionActions: NO_SESSION_ACTIONS,
+            primaryAction: 'copy',
           }
         : { ...board, stale: true, error: message };
       commit(staleBoard);

@@ -71,4 +71,56 @@ describe('loadConfig', () => {
     expect(() => loadConfig('/nonexistent/config.json'))
       .toThrow(/config\.example\.json/);
   });
+
+  describe('sessions', () => {
+    const sessions = {
+      enabled: true,
+      claudeCommand: '/usr/bin/claude',
+      claudeDir: '~/.claude',
+      repoPaths: { 'paranext/paranext-core': '/home/me/core' },
+      startPrompt: 'Look at {url} ({title}) by {author} in {repo} #{number}.',
+      openTerminalCommand: ['wt.exe', '--title', '{name}', '{claudeCommand}', 'attach', '{id}', '{cwd}', '{sessionId}'],
+    };
+
+    it('leaves sessions unset when omitted', () => {
+      expect(loadConfig(write(valid)).sessions).toBeUndefined();
+    });
+
+    it('accepts a full sessions block unchanged', () => {
+      expect(loadConfig(write({ ...valid, sessions })).sessions).toEqual(sessions);
+    });
+
+    it('accepts an empty sessions block', () => {
+      expect(loadConfig(write({ ...valid, sessions: {} })).sessions).toEqual({});
+    });
+
+    it.each([
+      ['not an object', 'yes'],
+      ['an array', []],
+      ['a non-boolean enabled', { enabled: 'yes' }],
+      ['an empty claudeCommand', { claudeCommand: '' }],
+      ['a non-string claudeDir', { claudeDir: 5 }],
+      ['repoPaths as an array', { repoPaths: ['/x'] }],
+      ['a non-string repoPaths value', { repoPaths: { 'a/b': 5 } }],
+      ['an empty repoPaths value', { repoPaths: { 'a/b': '' } }],
+      ['a non-string startPrompt', { startPrompt: 5 }],
+      ['openTerminalCommand as a shell string', { openTerminalCommand: 'wt.exe -w 0' }],
+      ['an empty openTerminalCommand', { openTerminalCommand: [] }],
+      ['a non-string argv element', { openTerminalCommand: ['wt.exe', 5] }],
+    ])('rejects sessions with %s, naming the field', (_label, block) => {
+      expect(() => loadConfig(write({ ...valid, sessions: block }))).toThrow(/sessions/);
+    });
+
+    it('rejects an unknown placeholder in the terminal command, naming it', () => {
+      expect(() => loadConfig(write({
+        ...valid, sessions: { openTerminalCommand: ['term', '{title}'] },
+      }))).toThrow(/\{title\}/);
+    });
+
+    it('rejects an unknown placeholder in the start prompt, naming it', () => {
+      expect(() => loadConfig(write({
+        ...valid, sessions: { startPrompt: 'Look at {cwd}' },
+      }))).toThrow(/\{cwd\}/);
+    });
+  });
 });

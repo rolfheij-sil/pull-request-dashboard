@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
+import { AnnounceContext } from './announce';
 import { fetchBoard, type Board, type BoardItem } from './api';
 import {
   BUCKET_LABEL, BUCKET_ORDER, EXPANDED, REVIEW_BUCKET_LABEL, REVIEW_BUCKET_ORDER,
 } from './buckets';
 import { Card } from './Card';
+import type { RowOptions } from './SessionRows';
+import { SettingsPanel } from './SettingsPanel';
 import { notificationPermission, showNewNotifications } from './notifications';
 
 type Tab = 'mine' | 'others';
@@ -60,11 +63,12 @@ function NotificationControl() {
   );
 }
 
-function BucketSections({ order, labels, items, asOf, onChange }: {
+function BucketSections({ order, labels, items, asOf, sessionOptions, onChange }: {
   order: readonly string[];
   labels: Record<string, string>;
   items: BoardItem[];
   asOf: number;
+  sessionOptions: RowOptions;
   onChange: () => void;
 }) {
   return (
@@ -79,6 +83,7 @@ function BucketSections({ order, labels, items, asOf, onChange }: {
                 key={`${item.repo}#${item.number}`}
                 item={item}
                 now={asOf}
+                sessionOptions={sessionOptions}
                 onChange={onChange}
               />
             ))}
@@ -109,6 +114,11 @@ export function App() {
   const [board, setBoard] = useState<Board | null>(null);
   const [failed, setFailed] = useState(false);
   const [tab, setTab] = useState<Tab>(readStoredTab);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [announcement, setAnnouncement] = useState({ text: '', count: 0 });
+  const announce = useCallback((text: string) => {
+    setAnnouncement((previous) => ({ text, count: previous.count + 1 }));
+  }, []);
 
   const selectTab = (next: Tab) => {
     setTab(next);
@@ -156,12 +166,43 @@ export function App() {
   // the verdicts computed at that moment. Only the pre-first-poll shell has no
   // `fetchedAt`, and it has no cards to age.
   const asOf = board.fetchedAt === null ? Date.now() : Date.parse(board.fetchedAt);
+  const sessionOptions: RowOptions = {
+    actions: board.sessionActions, primaryAction: board.primaryAction,
+  };
+  const repos = [...new Set(
+    [...board.items, ...board.reviewing].map((item) => item.repo.toLowerCase()),
+  )].sort();
 
   return (
+    <AnnounceContext.Provider value={announce}>
     <main>
-      <h1>{board.yourCourtCount} in your court</h1>
+      {/* A new child each time, so an identical message is read out again. */}
+      <div role="status" aria-live="polite" className="visually-hidden">
+        <span key={announcement.count}>{announcement.text}</span>
+      </div>
+      <div className="title-row">
+        <h1>{board.yourCourtCount} in your court</h1>
+        <button
+          type="button"
+          className="gear"
+          aria-label="Claude Code session settings"
+          title="Claude Code session settings"
+          onClick={() => setSettingsOpen(true)}
+        >
+          ⚙
+        </button>
+      </div>
+      <SettingsPanel
+        open={settingsOpen}
+        repos={repos}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={() => void load()}
+      />
       <p className="summary">{summaryLine(board)}</p>
       <NotificationControl />
+      {board.sessionsError !== null && (
+        <p className="sessions-error">Claude Code sessions unavailable — {board.sessionsError}</p>
+      )}
 
       {failed && (
         <p className="banner">
@@ -208,6 +249,7 @@ export function App() {
           labels={BUCKET_LABEL}
           items={board.items}
           asOf={asOf}
+          sessionOptions={sessionOptions}
           onChange={() => void load()}
         />
 
@@ -216,8 +258,8 @@ export function App() {
             <summary>Local branches ({board.branches.length})</summary>
             {/*
               A plain list of local branches, not a claim about unsubmitted work:
-              we do not fetch headRefName, so we cannot tell which branches have
-              PRs. The only distinction we can honestly draw is a gone upstream.
+              the list is not correlated with PRs, so the only distinction it
+              draws is a gone upstream.
             */}
             <ul>
               {board.branches.map((b) => (
@@ -242,10 +284,12 @@ export function App() {
             labels={REVIEW_BUCKET_LABEL}
             items={board.reviewing}
             asOf={asOf}
+            sessionOptions={sessionOptions}
             onChange={() => void load()}
           />
         )}
       </div>
     </main>
+    </AnnounceContext.Provider>
   );
 }

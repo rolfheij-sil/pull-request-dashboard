@@ -56,6 +56,10 @@ export interface PrInput {
   updatedAt: string;
   isDraft: boolean;
   headOid: string;
+  /** The PR's head branch name; null or absent when unknown (captured fixtures predate it). */
+  headRefName?: string | null;
+  /** The PR's head branch is in a fork, so its name says nothing about local branches; absent means false. */
+  isCrossRepository?: boolean;
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   mergeStateStatus: string;
   reviews: ReviewInput[];
@@ -112,6 +116,24 @@ export interface Classification {
 
 export type Scope = 'repo' | 'org';
 
+/** Links board cards to local Claude Code sessions. Absent or `enabled: false` turns the feature off. */
+export interface SessionsConfig {
+  enabled?: boolean;
+  /** Path to the Claude Code CLI. Defaults to `claude`. */
+  claudeCommand?: string;
+  /** Claude Code's data directory. Defaults to `$CLAUDE_CONFIG_DIR`, then `~/.claude`. */
+  claudeDir?: string;
+  /** Local clone per `owner/name`; a repo needs an entry here to offer "Start session". */
+  repoPaths?: Record<string, string>;
+  /** Prompt for a started session. Placeholders: {url} {title} {repo} {number} {author}. */
+  startPrompt?: string;
+  /**
+   * argv that opens a terminal attached to a session. Never run through a shell.
+   * Placeholders: {id} {sessionId} {cwd} {name} {claudeCommand}.
+   */
+  openTerminalCommand?: string[];
+}
+
 export interface Config {
   /** The home repo's local clone; the branch list reads it. */
   repoPath: string;
@@ -126,4 +148,6 @@ export interface Config {
   staleAfterHours: number;
   /** Others' PRs with no activity for this many days go quiet. Defaults to 30. */
   quietAfterDays?: number;
+  /** Optional Claude Code session linking; the feature is off without it. */
+  sessions?: SessionsConfig;
 }

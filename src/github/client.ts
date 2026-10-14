@@ -15,6 +15,8 @@ export function mapPullRequest(node: GqlNode): PrInput {
     updatedAt: node.updatedAt ?? '',
     isDraft: node.isDraft,
     headOid: node.headRefOid,
+    headRefName: node.headRefName ?? null,
+    isCrossRepository: node.isCrossRepository === true,
     mergeable: node.mergeable,
     mergeStateStatus: node.mergeStateStatus,
     reviews: (node.reviews?.nodes ?? []).map((r: GqlNode) => ({

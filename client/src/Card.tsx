@@ -1,5 +1,8 @@
+import { useState } from 'react';
 import type { BoardItem } from './api';
 import { markPostedToDiscord } from './api';
+import { useAnnounce } from './announce';
+import { SessionRows, type RowOptions } from './SessionRows';
 
 const DOT: Record<BoardItem['checkDot'], string> = {
   fail: '#d64545', pending: '#c98a20', pass: '#3f9142', none: 'transparent',
@@ -18,21 +21,33 @@ const ago = (iso: string | null, now: number): string => {
   return `${Math.round(hours / 24)}d`;
 };
 
-export function Card({ item, now, onChange }: {
+export function Card({ item, now, sessionOptions, onChange }: {
   item: BoardItem;
+  /** Which session buttons the server offers, and which leads. */
+  sessionOptions: RowOptions;
   /** The board's `fetchedAt`, as epoch ms — the reference point for ages. */
   now: number;
   onChange: () => void;
 }) {
+  const announce = useAnnounce();
+  const [postError, setPostError] = useState<string | null>(null);
+
   const post = async () => {
-    await markPostedToDiscord(item.repo, item.number, true);
-    onChange();
+    setPostError(null);
+    try {
+      await markPostedToDiscord(item.repo, item.number, true);
+      onChange();
+    } catch (error) {
+      const text = `Could not mark this as posted to Discord — ${error instanceof Error ? error.message : String(error)}`;
+      setPostError(text);
+      announce(`Failed: ${text}`);
+    }
   };
 
   return (
     <li className="card">
       <div className="card-head">
-        <span className="dot" style={{ background: DOT[item.checkDot] }} />
+        <span className="dot" style={{ background: DOT[item.checkDot] }} aria-hidden="true" />
         <a href={item.url} target="_blank" rel="noreferrer">
           <span className="repo">{item.repo.split('/')[1] ?? item.repo}</span>{' '}
           {item.role === 'reviewer' && <span className="repo">by {item.author}{' '}</span>}
@@ -51,9 +66,12 @@ export function Card({ item, now, onChange }: {
         </ul>
       )}
 
+      <SessionRows item={item} options={sessionOptions} onChange={onChange} />
+
       {item.role === 'author' && (item.bucket === 'not-asked' || item.bucket === 'draft') && (
-        <button type="button" onClick={post}>Posted to Discord</button>
+        <button type="button" onClick={() => void post()}>Posted to Discord</button>
       )}
+      {postError !== null && <p className="session-message">{postError}</p>}
     </li>
   );
 }

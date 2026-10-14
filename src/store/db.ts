@@ -24,6 +24,11 @@ export interface Store {
   recordObserved(pr: string, key: NotifyKey): void;
   /** Called only when a notification actually fired. */
   recordNotified(pr: string, key: NotifyKey, now: Date): void;
+  /** A saved settings value (JSON), or null when never saved. */
+  getSetting(key: string): unknown;
+  setSetting(key: string, value: unknown): void;
+  /** Forgets a saved setting. */
+  deleteSetting(key: string): void;
   close(): void;
 }
 
@@ -45,6 +50,7 @@ export function openStore(path: string, homeRepo: string): Store {
       last_key TEXT NOT NULL,
       last_notified_at TEXT
     );
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `);
   migrateLegacyTables(db, homeRepo);
 
@@ -99,6 +105,25 @@ export function openStore(path: string, homeRepo: string): Store {
            last_key = excluded.last_key,
            last_notified_at = excluded.last_notified_at`,
       ).run(pr, key, now.toISOString());
+    },
+    getSetting(name) {
+      const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(name) as
+        | { value: string } | undefined;
+      if (row === undefined) return null;
+      try {
+        return JSON.parse(row.value) as unknown;
+      } catch {
+        return null;
+      }
+    },
+    setSetting(name, value) {
+      db.prepare(
+        `INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      ).run(name, JSON.stringify(value));
+    },
+    deleteSetting(name) {
+      db.prepare('DELETE FROM settings WHERE key = ?').run(name);
     },
     close() { db.close(); },
   };
