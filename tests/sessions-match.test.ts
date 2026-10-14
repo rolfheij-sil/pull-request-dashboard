@@ -28,12 +28,12 @@ const pr = (over: Partial<PrInput>): PrInput => ({
 const session = (over: Partial<SessionInfo> = {}): SessionInfo => ({
   id: 'aaaa1111', sessionId: 'sess-1', name: 'unrelated', kind: 'background',
   status: 'idle', state: 'done', cwd: '/work', startedAt: 1000, branch: null, repo: null,
-  prLinks: [], intent: '', claudeAiUrl: null, ...over,
+  branchSource: null, prLinks: [], intent: '', claudeAiUrl: null, ...over,
 });
 
 const target = (over: Partial<Parameters<typeof matchOne>[1]> = {}) => ({
   repo: HOME, number: 2880, url: `https://github.com/${HOME}/pull/2880`,
-  headRefName: 'pt-1-feature' as string | null, ...over,
+  headRefName: 'pt-1-feature' as string | null, isCrossRepository: false, ...over,
 });
 
 const ctx = { error: null, actions: { openTerminal: false, openDesktop: false, startSession: false } };
@@ -70,6 +70,24 @@ describe('matchOne', () => {
     expect(matchOne(s, target(), 2)).toBeNull();
   });
 
+  it('does not branch-match a pull request from a fork', () => {
+    const s = session({ branch: 'pt-1-feature', repo: HOME });
+    expect(matchOne(s, target({ isCrossRepository: true }), 1)).toBeNull();
+  });
+
+  it('branch-matches a live session on a checkout branch, but not an ended one', () => {
+    const checkout = { branch: 'pt-1-feature', repo: HOME, branchSource: 'git' as const };
+    expect(matchOne(session({ ...checkout, status: 'busy' }), target(), 1)).toBe('branch');
+    expect(matchOne(session({ ...checkout, status: null, state: 'done' }), target(), 1)).toBeNull();
+  });
+
+  it('branch-matches an ended session whose job recorded the branch', () => {
+    const s = session({
+      status: null, state: 'done', branch: 'pt-1-feature', branchSource: 'job', repo: HOME,
+    });
+    expect(matchOne(s, target(), 1)).toBe('branch');
+  });
+
   it('does not match when the session repo is unknown', () => {
     expect(matchOne(session({ branch: 'pt-1-feature', repo: null }), target(), 1)).toBeNull();
   });
@@ -92,6 +110,11 @@ describe('matchOne', () => {
     const s = session({ name: 'fix #2880', repo: null });
     expect(matchOne(s, target(), 1)).toBe('number');
     expect(matchOne(s, target(), 2)).toBeNull();
+  });
+
+  it('never matches #<number> from a known other repo, even when the number is unique', () => {
+    const s = session({ name: 'fix #2880', repo: STUDIO });
+    expect(matchOne(s, target({ repo: HOME }), 1)).toBeNull();
   });
 
   it('lets the session repo settle a number shared across repos', () => {
@@ -211,6 +234,14 @@ describe('attachSessions', () => {
     expect(attached.items[0]?.startPreview?.prompt).toContain('/pull/2880');
     expect(attached.reviewing[0]?.canStartSession).toBe(false);
     expect(attached.reviewing[0]?.startPreview).toBeNull();
+  });
+
+  it('carries whether the head branch is in a fork through buildBoard', () => {
+    expect(board().items[0]?.isCrossRepository).toBe(false);
+    const forked = buildBoard(
+      [pr({ isCrossRepository: true })], [], openStore(':memory:', HOME), cfg, NOW,
+    );
+    expect(forked.items[0]?.isCrossRepository).toBe(true);
   });
 
   it('carries the PR head branch through buildBoard', () => {

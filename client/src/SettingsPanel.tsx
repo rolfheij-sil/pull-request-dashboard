@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { fetchSetup, redetectSetup, saveSetup, SetupSaveError, type SetupResponse } from './api';
 import {
-  buildPatch, draftFrom, platformLabel, primaryActionChoices, type SettingsDraft,
+  buildPatch, draftFrom, platformLabel, primaryActionChoices, repoRows, sameDraft, unownedErrors,
+  type SettingsDraft,
 } from './sessions';
+
+/** How often the panel asks again while the server is still detecting. */
+const DETECTING_POLL_MS = 1500;
 
 const PLACEHOLDERS = '{url} {title} {repo} {number} {author}';
 
@@ -43,6 +47,21 @@ export function SettingsPanel({ open, repos, onClose, onSaved }: {
     }
   }, [open]);
 
+  // Detection runs in the background after startup; pick up its result when it
+  // lands, without discarding anything the user has already changed.
+  useEffect(() => {
+    if (!open || setup === null || !setup.detecting) return undefined;
+    const timer = setTimeout(() => {
+      fetchSetup().then((next) => {
+        setSetup(next);
+        setDraft((current) => (
+          current !== null && sameDraft(current, draftFrom(setup)) ? draftFrom(next) : current
+        ));
+      }).catch(() => {});
+    }, DETECTING_POLL_MS);
+    return () => clearTimeout(timer);
+  }, [open, setup]);
+
   const save = async (event: FormEvent) => {
     event.preventDefault();
     if (setup === null || draft === null) return;
@@ -50,7 +69,7 @@ export function SettingsPanel({ open, repos, onClose, onSaved }: {
     setErrors({});
     setStatus(null);
     try {
-      adopt(await saveSetup(buildPatch(setup, draft, repos)));
+      adopt(await saveSetup(buildPatch(setup, draft, repoRows(repos, setup).map((row) => row.repo))));
       setStatus('Saved.');
       onSaved();
     } catch (error) {
@@ -76,6 +95,13 @@ export function SettingsPanel({ open, repos, onClose, onSaved }: {
   };
 
   const locked = (field: string) => setup?.lockedByConfig.includes(field) ?? false;
+  const rows = setup === null ? [] : repoRows(repos, setup);
+  // Every error key a field of the form shows itself; the rest are listed at the top.
+  const shownFields = [
+    'primaryAction', 'terminalPreset', 'startPrompt', 'repoPaths',
+    ...rows.map((row) => `repoPaths.${row.repo}`),
+  ];
+  const otherErrors = unownedErrors(errors, shownFields);
   const hasTerminal = setup !== null
     && (setup.detected.terminals.length > 0 || setup.effective.openTerminalSource === 'config');
 
@@ -89,12 +115,21 @@ export function SettingsPanel({ open, repos, onClose, onSaved }: {
       <form onSubmit={(event) => void save(event)}>
         <h2 id="settings-title">Claude Code sessions</h2>
 
+        {otherErrors.length > 0 && (
+          <ul className="form-errors" role="alert">
+            {otherErrors.map((line) => <li key={line}>{line}</li>)}
+          </ul>
+        )}
+
         {(setup === null || draft === null) ? (
           <p>{status ?? 'Loading…'}</p>
         ) : (
           <>
             <section aria-labelledby="settings-detected">
-              <h3 id="settings-detected">Detected on this machine</h3>
+              <h3 id="settings-detected">
+                Detected on this machine
+                {setup.detecting && <span className="hint" role="status"> — Detecting…</span>}
+              </h3>
               <dl className="detected">
                 <dt>Platform</dt>
                 <dd>{platformLabel(setup.detected.platform, setup.detected.wslDistro)}</dd>
@@ -169,13 +204,14 @@ export function SettingsPanel({ open, repos, onClose, onSaved }: {
 
             <fieldset>
               <legend>Repo folders (for Start session)</legend>
-              {repos.length === 0 && <p className="hint">No PRs on the board yet.</p>}
-              {repos.map((repo) => {
+              {rows.length === 0 && <p className="hint">No PRs on the board yet.</p>}
+              {rows.map(({ repo, onBoard }) => {
                 const candidates = setup.detected.repoClones[repo] ?? [];
                 const isLocked = locked(`repoPaths.${repo}`);
                 return (
                   <div key={repo} className="repo-row">
                     <span className="repo-name">{repo}</span>
+                    {!onBoard && <span className="hint">not on the board right now</span>}
                     {isLocked && <span className="hint">Set in config.json</span>}
                     {!isLocked && candidates.length > 0 && (
                       <select
@@ -222,14 +258,13 @@ export function SettingsPanel({ open, repos, onClose, onSaved }: {
             </label>
             <p id="settings-placeholders" className="hint">Placeholders: {PLACEHOLDERS}</p>
             <FieldError message={errors.startPrompt} />
-            <FieldError message={errors.body} />
 
             {status !== null && <p className="hint" role="status">{status}</p>}
           </>
         )}
 
         <div className="settings-buttons">
-          <button type="submit" className="session-button session-button-primary" disabled={busy || setup === null}>
+          <button type="submit" className="session-button session-button-primary" disabled={busy || setup === null || setup.detecting}>
             Save
           </button>
           <button type="button" className="session-button" onClick={onClose}>Close</button>

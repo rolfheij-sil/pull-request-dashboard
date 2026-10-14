@@ -2,15 +2,19 @@ import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createLimiter, GIT_CONCURRENCY } from '../concurrency.js';
 import { prKey } from '../pr-key.js';
 import type { SessionsConfig } from '../types.js';
 import type {
-  SessionInfo, SessionKind, SessionState, SessionStatus,
+  BranchSource, SessionInfo, SessionKind, SessionState, SessionStatus,
 } from './types.js';
 
 const AGENTS_TIMEOUT_MS = 10_000;
 const GIT_TIMEOUT_MS = 3_000;
 const AGENTS_MAX_BUFFER = 16 * 1024 * 1024;
+/** A folder's origin remote rarely changes; its checked-out branch changes often. */
+export const REPO_CACHE_MS = 5 * 60_000;
+export const BRANCH_CACHE_MS = 60_000;
 
 /** The I/O the listing needs, injectable so tests need no real CLI or files. */
 export interface ListDeps {
@@ -20,6 +24,8 @@ export interface ListDeps {
   readText(path: string): string | null;
   env: Record<string, string | undefined>;
   homeDir: string;
+  /** Epoch milliseconds; defaults to the wall clock. Drives the git cache expiry. */
+  now?(): number;
 }
 
 export const defaultListDeps: ListDeps = {
@@ -137,26 +143,63 @@ function readProcessRecord(
   return record === null ? null : { bridgeSessionId: str(record.bridgeSessionId) };
 }
 
-interface GitInfo { branch: string | null; repo: string | null }
+interface CacheEntry { value: Promise<string | null>; at: number }
 
-async function readGit(deps: ListDeps, cwd: string): Promise<GitInfo> {
-  const run = async (args: string[]): Promise<string | null> => {
+/**
+ * Git answers per working directory, kept across refreshes, plus the limiter
+ * that caps concurrent git calls. One per `ListDeps`, so a fresh set of deps
+ * starts empty.
+ */
+interface GitState {
+  limit: <T>(task: () => Promise<T>) => Promise<T>;
+  repo: Map<string, CacheEntry>;
+  branch: Map<string, CacheEntry>;
+}
+
+const gitStates = new WeakMap<ListDeps, GitState>();
+
+function gitStateFor(deps: ListDeps): GitState {
+  let state = gitStates.get(deps);
+  if (state === undefined) {
+    state = { limit: createLimiter(GIT_CONCURRENCY), repo: new Map(), branch: new Map() };
+    gitStates.set(deps, state);
+  }
+  return state;
+}
+
+/** One git answer for `cwd`, from the cache while it is younger than `ttl`. */
+function cachedGit(
+  deps: ListDeps, cache: Map<string, CacheEntry>, ttl: number, cwd: string, args: string[],
+): Promise<string | null> {
+  const now = deps.now?.() ?? Date.now();
+  const hit = cache.get(cwd);
+  if (hit !== undefined && now - hit.at < ttl) return hit.value;
+  const value = gitStateFor(deps).limit(async () => {
     try {
       const out = (await deps.exec('git', ['-C', cwd, ...args], { timeout: GIT_TIMEOUT_MS })).trim();
       return out === '' ? null : out;
     } catch {
       return null;
     }
-  };
-  const [branch, remote] = await Promise.all([
-    run(['rev-parse', '--abbrev-ref', 'HEAD']),
-    run(['remote', 'get-url', 'origin']),
-  ]);
-  return {
-    // A detached HEAD prints "HEAD", which is not a branch.
-    branch: branch === 'HEAD' ? null : branch,
-    repo: remote === null ? null : repoFromRemote(remote),
-  };
+  });
+  cache.set(cwd, { value, at: now });
+  return value;
+}
+
+/** Lowercased `owner/name` of the folder's origin remote, or null. */
+async function readRepo(deps: ListDeps, cwd: string): Promise<string | null> {
+  const remote = await cachedGit(
+    deps, gitStateFor(deps).repo, REPO_CACHE_MS, cwd, ['remote', 'get-url', 'origin'],
+  );
+  return remote === null ? null : repoFromRemote(remote);
+}
+
+/** The folder's checked-out branch, or null (also for a detached HEAD, which prints "HEAD"). */
+async function readBranch(deps: ListDeps, cwd: string): Promise<string | null> {
+  const branch = await cachedGit(
+    deps, gitStateFor(deps).branch, BRANCH_CACHE_MS, cwd, ['rev-parse', '--abbrev-ref', 'HEAD'],
+  );
+  return branch === 'HEAD' ? null : branch;
 }
 
 /**
@@ -182,16 +225,6 @@ export async function listSessions(
   }
 
   const claudeDir = resolveClaudeDir(cfg, deps);
-  const gitByCwd = new Map<string, Promise<GitInfo>>();
-  const gitFor = (cwd: string): Promise<GitInfo> => {
-    let pending = gitByCwd.get(cwd);
-    if (pending === undefined) {
-      pending = readGit(deps, cwd);
-      gitByCwd.set(cwd, pending);
-    }
-    return pending;
-  };
-
   const sessions = await Promise.all(entries.filter(isObject).map(async (entry) => {
     const sessionId = str(entry.sessionId);
     if (sessionId === null) return null;
@@ -200,18 +233,30 @@ export async function listSessions(
     const cwd = str(entry.cwd) ?? '';
     const job = id === null ? null : readJob(deps, claudeDir, id);
     const processRecord = readProcessRecord(deps, claudeDir, pid);
-    const git = cwd === '' ? { branch: null, repo: null } : await gitFor(cwd);
+    const status = STATUSES.includes(entry.status as string) ? (entry.status as SessionStatus) : null;
+    // A branch only links a session to a PR when the session is live or the job
+    // recorded the branch itself; for any other session the checkout says nothing
+    // about what the session worked on, so git is not asked.
+    const needsGitBranch = cwd !== '' && job?.worktreeBranch == null && status !== null;
+    const [gitBranch, repo] = await Promise.all([
+      needsGitBranch ? readBranch(deps, cwd) : Promise.resolve(null),
+      cwd === '' ? Promise.resolve(null) : readRepo(deps, cwd),
+    ]);
+    const branch = job?.worktreeBranch ?? gitBranch;
+    const branchSource: BranchSource = job?.worktreeBranch != null ? 'job'
+      : gitBranch !== null ? 'git' : null;
     const session: SessionInfo = {
       id,
       sessionId,
       name: str(entry.name) ?? '',
       kind: (entry.kind === 'background' ? 'background' : 'interactive') satisfies SessionKind,
-      status: STATUSES.includes(entry.status as string) ? (entry.status as SessionStatus) : null,
+      status,
       state: STATES.includes(entry.state as string) ? (entry.state as SessionState) : null,
       cwd,
       startedAt: typeof entry.startedAt === 'number' ? entry.startedAt : 0,
-      branch: job?.worktreeBranch ?? git.branch,
-      repo: git.repo,
+      branch,
+      branchSource,
+      repo,
       prLinks: job?.prLinks ?? [],
       intent: job?.intent ?? '',
       claudeAiUrl: claudeAiUrl(processRecord?.bridgeSessionId ?? job?.bridgeSessionId ?? null),

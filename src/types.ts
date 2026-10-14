@@ -58,6 +58,8 @@ export interface PrInput {
   headOid: string;
   /** The PR's head branch name; null or absent when unknown (captured fixtures predate it). */
   headRefName?: string | null;
+  /** The PR's head branch is in a fork, so its name says nothing about local branches; absent means false. */
+  isCrossRepository?: boolean;
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
   mergeStateStatus: string;
   reviews: ReviewInput[];

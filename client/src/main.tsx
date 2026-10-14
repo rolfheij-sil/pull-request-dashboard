@@ -71,6 +71,11 @@ style.textContent = `
   .session-button:disabled { opacity: .6; cursor: default; }
   .session-message { margin-left: 8px; font-size: 12px; color: #6b6862; white-space: pre-wrap; }
   .offscreen { position: fixed; top: 0; left: -9999px; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+                     clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .session-message p { margin: 0 0 4px; }
+  .session-message code { font-size: 12px; user-select: all; }
+  .settings .form-errors { color: #b3261e; font-size: 12px; margin: 8px 0; padding-left: 18px; }
   button { margin-top: 10px; font: inherit; padding: 5px 10px; border-radius: 6px;
            border: 1px solid #d4d0c8; background: #fff; cursor: pointer; }
   @media (prefers-color-scheme: dark) {
@@ -95,7 +100,7 @@ style.textContent = `
     .settings fieldset { border-color: #35332e; }
     .settings legend, .settings .detected dt, .settings .field > span:first-child { color: #9b968d; }
     .settings input[type="text"], .settings select, .settings textarea { background: #171614; border-color: #35332e; }
-    .settings .field-error { color: #f2b8b5; }
+    .settings .field-error, .settings .form-errors { color: #f2b8b5; }
     .session-message { color: #9b968d; }
     .session-dot-idle { background: #9b968d; }
     .session-dot-ended { border-color: #9b968d; }

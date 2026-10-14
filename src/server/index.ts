@@ -4,6 +4,7 @@ import { notificationsSupported } from '../notify/osascript.js';
 import { openStore } from '../store/db.js';
 import { createSessionService, type SessionService } from '../sessions/service.js';
 import { createSetupService } from '../setup/service.js';
+import { registerHostGuard } from './host.js';
 import { createPoller } from './poller.js';
 import { registerRoutes } from './routes.js';
 
@@ -33,17 +34,31 @@ const setup = createSetupService({
   store,
   liveSessions: () => sessionService?.snapshot().sessions ?? [],
 });
-await setup.redetect();
 sessionService = createSessionService(() => setup.effective().sessions);
-
-const app = Fastify({ logger: { level: 'warn' } });
-registerRoutes(app, poller, store, { sessions: sessionService, setup });
-
-poller.start();
-sessionService.start();
-// Once the first listing is in, look again so clones that live sessions run in are found.
-void sessionService.refresh().then(() => setup.redetect());
+const service = sessionService;
 
 const port = Number(process.env.PORT ?? 5174);
+const app = Fastify({ logger: { level: 'warn' } });
+registerHostGuard(app, port);
+registerRoutes(app, poller, store, { sessions: service, setup });
+
+// Listen before any slow work: detection runs a handful of child processes.
+// Until it finishes the setup API reports `detecting` and an empty detection.
 await app.listen({ port, host: '127.0.0.1' });
 console.log(`PR dashboard API on http://127.0.0.1:${port}`);
+
+poller.start();
+
+const logFailure = (what: string) => (error: unknown): void => {
+  console.error(`${what} failed:`, error);
+};
+
+async function detectInBackground(): Promise<void> {
+  await setup.redetect().catch(logFailure('Detecting this machine'));
+  service.start();
+  // Once the first listing is in, look again so clones that live sessions run in are found.
+  await service.refresh()
+    .then(() => setup.redetect())
+    .catch(logFailure('The first session refresh'));
+}
+detectInBackground().catch(logFailure('Background detection'));

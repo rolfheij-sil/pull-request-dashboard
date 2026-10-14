@@ -21,3 +21,26 @@ export function fillTemplate(template: string, values: Record<string, string>): 
   return template.replace(PLACEHOLDER, (whole, name: string) =>
     Object.prototype.hasOwnProperty.call(values, name) ? values[name]! : whole);
 }
+
+/** Single-quotes `value` for a POSIX shell, escaping any single quote inside it. */
+export const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+
+/** True when `program` is Windows Terminal's launcher (`wt` or `wt.exe`, in any folder and case). */
+export function isWindowsTerminal(program: string): boolean {
+  const base = program.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+  return base === 'wt' || base === 'wt.exe';
+}
+
+/**
+ * Fills every element of a command template. Windows Terminal reads an
+ * unescaped `;` anywhere in its arguments as the separator between its own
+ * subcommands, so for `wt`/`wt.exe` each `;` in a substituted value is written
+ * `\;`. Literal template text is left alone.
+ */
+export function fillArgv(argv: readonly string[], values: Record<string, string>): string[] {
+  const program = fillTemplate(argv[0] ?? '', values);
+  const safe = isWindowsTerminal(program)
+    ? Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value.replaceAll(';', '\\;')]))
+    : values;
+  return argv.map((element) => fillTemplate(element, safe));
+}

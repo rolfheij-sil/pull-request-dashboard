@@ -4,13 +4,13 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { createLimiter, GIT_CONCURRENCY } from '../concurrency.js';
 import { repoFromRemote } from '../sessions/list.js';
 
 const VERSION_TIMEOUT_MS = 5_000;
 const GIT_TIMEOUT_MS = 2_000;
 /** The most directories the clone search looks inside. */
 export const MAX_DIRS_SCANNED = 200;
-const GIT_CONCURRENCY = 8;
 
 export type Platform = 'wsl' | 'linux' | 'darwin' | 'win32';
 
@@ -18,7 +18,10 @@ export type Platform = 'wsl' | 'linux' | 'darwin' | 'win32';
 export interface TerminalPreset {
   id: string;
   label: string;
-  /** argv with `{id}` `{cwd}` `{name}` placeholders; detected values are already baked in. */
+  /**
+   * argv with `{id}` `{cwd}` `{name}` `{claudeCommand}` placeholders; the distro is baked in,
+   * and `{claudeCommand}` resolves to config.json's CLI path when set, else the detected one.
+   */
   argv: string[];
 }
 
@@ -170,9 +173,11 @@ const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
 /**
- * Terminal presets for this machine. Values from the machine (the distro and
- * the CLI path) are baked into the argv; the session's directory, name and id
- * stay `{placeholders}`. On macOS they are passed to AppleScript as separate
+ * Terminal presets for this machine. The distro is baked into the argv; the
+ * CLI path and the session's directory and id stay `{placeholders}`. The
+ * Windows Terminal presets leave out `--title`: the session's name is
+ * untrusted text and Windows Terminal reads `;` in any argument as a command
+ * separator. On macOS the values are passed to AppleScript as separate
  * arguments after the script, so nothing session-derived is ever part of
  * script text.
  */
@@ -188,9 +193,9 @@ export function terminalPresets(
       id: 'wt-wsl',
       label: 'Windows Terminal (into WSL)',
       argv: [
-        'wt.exe', '-w', '0', 'new-tab', '--title', '{name}',
+        'wt.exe', '-w', '0', 'new-tab',
         'wsl.exe', ...(wslDistro === null ? [] : ['-d', wslDistro]),
-        '--cd', '{cwd}', '--', claudePath, 'attach', '{id}',
+        '--cd', '{cwd}', '--', '{claudeCommand}', 'attach', '{id}',
       ],
     });
   }
@@ -199,8 +204,8 @@ export function terminalPresets(
       id: 'wt',
       label: 'Windows Terminal',
       argv: [
-        'wt.exe', '-w', '0', 'new-tab', '--title', '{name}', '-d', '{cwd}',
-        claudePath, 'attach', '{id}',
+        'wt.exe', '-w', '0', 'new-tab', '-d', '{cwd}',
+        '{claudeCommand}', 'attach', '{id}',
       ],
     });
   }
@@ -222,7 +227,7 @@ export function terminalPresets(
           '-e', 'tell application "Terminal" to activate',
           '-e', `tell application "Terminal" to do script ${attachLine}`,
           '-e', 'end run',
-          '{cwd}', claudePath, '{id}',
+          '{cwd}', '{claudeCommand}', '{id}',
         ],
       });
     }
@@ -239,7 +244,7 @@ export function terminalPresets(
           '-e', `tell current session of newWindow to write text (${attachLine})`,
           '-e', 'end tell',
           '-e', 'end run',
-          '{cwd}', claudePath, '{id}',
+          '{cwd}', '{claudeCommand}', '{id}',
         ],
       });
     }
@@ -252,7 +257,7 @@ export function terminalPresets(
       presets.push({
         id: 'terminal-env',
         label: `$TERMINAL (${fromEnv})`,
-        argv: [envTerminal, '-e', claudePath, 'attach', '{id}'],
+        argv: [envTerminal, '-e', '{claudeCommand}', 'attach', '{id}'],
       });
     }
     const generic = findOnPath('x-terminal-emulator', deps);
@@ -260,7 +265,7 @@ export function terminalPresets(
       presets.push({
         id: 'x-terminal-emulator',
         label: 'x-terminal-emulator',
-        argv: [generic, '-e', claudePath, 'attach', '{id}'],
+        argv: [generic, '-e', '{claudeCommand}', 'attach', '{id}'],
       });
     }
   }
@@ -351,12 +356,11 @@ export async function findRepoClones(
     });
   }
 
-  for (let start = 0; start < jobs.length; start += GIT_CONCURRENCY) {
-    await Promise.all(jobs.slice(start, start + GIT_CONCURRENCY).map(async (job) => {
-      const info = await gitInfo(deps, job.dir);
-      if (info !== null) job.apply(info);
-    }));
-  }
+  const limit = createLimiter(GIT_CONCURRENCY);
+  await Promise.all(jobs.map((job) => limit(async () => {
+    const info = await gitInfo(deps, job.dir);
+    if (info !== null) job.apply(info);
+  })));
 
   const result: Record<string, string[]> = {};
   for (const [repo, folders] of found) {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, type KeyboardEvent } from 'react';
+import { AnnounceContext } from './announce';
 import { fetchBoard, type Board, type BoardItem } from './api';
 import {
   BUCKET_LABEL, BUCKET_ORDER, EXPANDED, REVIEW_BUCKET_LABEL, REVIEW_BUCKET_ORDER,
@@ -114,6 +115,10 @@ export function App() {
   const [failed, setFailed] = useState(false);
   const [tab, setTab] = useState<Tab>(readStoredTab);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [announcement, setAnnouncement] = useState({ text: '', count: 0 });
+  const announce = useCallback((text: string) => {
+    setAnnouncement((previous) => ({ text, count: previous.count + 1 }));
+  }, []);
 
   const selectTab = (next: Tab) => {
     setTab(next);
@@ -169,7 +174,12 @@ export function App() {
   )].sort();
 
   return (
+    <AnnounceContext.Provider value={announce}>
     <main>
+      {/* A new child each time, so an identical message is read out again. */}
+      <div role="status" aria-live="polite" className="visually-hidden">
+        <span key={announcement.count}>{announcement.text}</span>
+      </div>
       <div className="title-row">
         <h1>{board.yourCourtCount} in your court</h1>
         <button
@@ -280,5 +290,6 @@ export function App() {
         )}
       </div>
     </main>
+    </AnnounceContext.Provider>
   );
 }

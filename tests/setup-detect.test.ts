@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  checkRepoFolder, detectPlatform, detectSetup, findOnPath, findRepoClones, MAX_DIRS_SCANNED,
+  checkRepoFolder, detectPlatform, detectSetup, findOnPath, findRepoClones,
   claudeCandidates, terminalPresets, type DetectDeps,
 } from '../src/setup/detect.js';
 
@@ -187,22 +187,38 @@ describe('claude resolution', () => {
       executables: [NODE, CLAUDE, '/mnt/wt/wt.exe'],
       versions: { [NODE]: '2.1.259', [CLAUDE]: '2.1.299' },
     });
-    expect(detected.terminals[0]?.argv).toContain(CLAUDE);
+    // The preset names the CLI by placeholder; the detected (newest) copy is what it resolves to.
+    expect(detected.claude.path).toBe(CLAUDE);
+    expect(detected.terminals[0]?.argv).toContain('{claudeCommand}');
     expect(detected.terminals[0]?.argv).not.toContain(NODE);
+    expect(detected.terminals[0]?.argv).not.toContain(CLAUDE);
   });
 });
 
 describe('terminal presets', () => {
-  it('offers Windows Terminal into WSL with the distro and CLI path baked in', () => {
+  it('offers Windows Terminal into WSL with the distro baked in and the CLI as a placeholder', () => {
     const { deps } = world({ env: { PATH: '/mnt/c/wt' }, executables: ['/mnt/c/wt/wt.exe'] });
     expect(terminalPresets('wsl', CLAUDE, 'Ubuntu', deps)).toEqual([{
       id: 'wt-wsl',
       label: 'Windows Terminal (into WSL)',
       argv: [
-        'wt.exe', '-w', '0', 'new-tab', '--title', '{name}', 'wsl.exe', '-d', 'Ubuntu',
-        '--cd', '{cwd}', '--', CLAUDE, 'attach', '{id}',
+        'wt.exe', '-w', '0', 'new-tab', 'wsl.exe', '-d', 'Ubuntu',
+        '--cd', '{cwd}', '--', '{claudeCommand}', 'attach', '{id}',
       ],
     }]);
+  });
+
+  it('keeps the session name out of the Windows Terminal presets', () => {
+    const wsl = world({ env: { PATH: '/w' }, executables: ['/w/wt.exe'] }).deps;
+    const win = world({ platform: 'win32', env: { PATH: 'C:\\w' }, executables: ['C:\\w\\wt.exe'] }).deps;
+    const presets = [
+      ...terminalPresets('wsl', CLAUDE, 'Ubuntu', wsl), ...terminalPresets('win32', 'C:\\c.exe', null, win),
+    ];
+    expect(presets.map((p) => p.id)).toEqual(['wt-wsl', 'wt']);
+    for (const { argv } of presets) {
+      expect(argv.join(' ')).not.toContain('{name}');
+      expect(argv).not.toContain('--title');
+    }
   });
 
   it('offers nothing on WSL without wt.exe, or without a claude path', () => {
@@ -215,7 +231,7 @@ describe('terminal presets', () => {
     const win = world({ platform: 'win32', env: { PATH: 'C:\\w' }, executables: ['C:\\w\\wt.exe'] });
     expect(terminalPresets('win32', 'C:\\claude.exe', null, win.deps).map((p) => p.id)).toEqual(['wt']);
     expect(terminalPresets('win32', 'C:\\claude.exe', null, win.deps)[0]?.argv).toEqual([
-      'wt.exe', '-w', '0', 'new-tab', '--title', '{name}', '-d', '{cwd}', 'C:\\claude.exe', 'attach', '{id}',
+      'wt.exe', '-w', '0', 'new-tab', '-d', '{cwd}', '{claudeCommand}', 'attach', '{id}',
     ]);
     const linux = world({ env: { PATH: '/w' }, executables: ['/w/wt.exe'] });
     expect(terminalPresets('linux', CLAUDE, null, linux.deps)).toEqual([]);
@@ -227,8 +243,8 @@ describe('terminal presets', () => {
       executables: ['/usr/bin/kitty', '/usr/bin/x-terminal-emulator'],
     });
     expect(terminalPresets('linux', CLAUDE, null, deps)).toEqual([
-      { id: 'terminal-env', label: '$TERMINAL (kitty)', argv: ['/usr/bin/kitty', '-e', CLAUDE, 'attach', '{id}'] },
-      { id: 'x-terminal-emulator', label: 'x-terminal-emulator', argv: ['/usr/bin/x-terminal-emulator', '-e', CLAUDE, 'attach', '{id}'] },
+      { id: 'terminal-env', label: '$TERMINAL (kitty)', argv: ['/usr/bin/kitty', '-e', '{claudeCommand}', 'attach', '{id}'] },
+      { id: 'x-terminal-emulator', label: 'x-terminal-emulator', argv: ['/usr/bin/x-terminal-emulator', '-e', '{claudeCommand}', 'attach', '{id}'] },
     ]);
   });
 
@@ -264,7 +280,7 @@ describe('terminal presets', () => {
         expect(script).not.toContain(CLAUDE);
       }
       // The values follow the last script, as separate arguments.
-      expect(argv.slice(-3)).toEqual(['{cwd}', CLAUDE, '{id}']);
+      expect(argv.slice(-3)).toEqual(['{cwd}', '{claudeCommand}', '{id}']);
       expect(scripts.join('\n')).toContain('quoted form of item 1 of argv');
     }
   });
@@ -333,21 +349,20 @@ describe('repo clone discovery', () => {
     expect(await findRepoClones(deps, { repoPath: '/g/core', sessionCwds: ['/nowhere'] })).toEqual({});
   });
 
-  it('scans at most 200 directories and gives each git call 2 seconds', async () => {
+  it('looks inside 200 directories at most, and gives each git call 2 seconds', async () => {
     const dirs = Array.from({ length: 500 }, (_, i) => `/g/r${i}`);
     const { deps, calls } = world({
       children: { '/g': dirs },
       paths: dirs.map((d) => `${d}/.git`),
       repos: Object.fromEntries(dirs.map((d, i) => [d, main(d, `git@github.com:o/r${i}.git`)])),
     });
-    const found = await findRepoClones(deps, {
+    await findRepoClones(deps, {
       repoPath: '/g/core', sessionCwds: Array.from({ length: 300 }, (_, i) => `/s/${i}`),
     });
+    // 801 folders are candidates; exactly 200 of them are asked about.
     const scanned = new Set(calls.filter((c) => c.file === 'git').map((c) => c.args[1]));
-    expect(scanned.size).toBeLessThanOrEqual(MAX_DIRS_SCANNED);
-    expect(MAX_DIRS_SCANNED).toBe(200);
+    expect(scanned.size).toBe(200);
     expect(calls.every((c) => c.file !== 'git' || c.timeout === 2000)).toBe(true);
-    expect(Object.keys(found).length).toBeLessThanOrEqual(200);
   });
 });
 

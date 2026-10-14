@@ -44,7 +44,20 @@ export function findRepoPath(
   return null;
 }
 
-type Target = Pick<BoardItem, 'repo' | 'number' | 'url' | 'headRefName'>;
+type Target = Pick<BoardItem, 'repo' | 'number' | 'url' | 'headRefName' | 'isCrossRepository'>;
+
+/**
+ * A branch name links a session to a PR only when the PR's head branch lives in
+ * the PR's own repo (not a fork), and the session either is running now or had
+ * its branch recorded by its job; a finished session's current checkout says
+ * nothing about what it worked on.
+ */
+function branchMatches(session: SessionInfo, item: Target, repo: string): boolean {
+  if (item.isCrossRepository || item.headRefName === null) return false;
+  if (SHARED_BRANCHES.has(item.headRefName) || session.repo !== repo) return false;
+  if (session.status === null && session.branchSource !== 'job') return false;
+  return session.branch === item.headRefName;
+}
 
 /** The strongest way `session` is tied to the PR, or null when it is not. */
 export function matchOne(
@@ -59,14 +72,14 @@ export function matchOne(
   const text = `${session.name}\n${session.intent}`;
   if (containsUrl(text, item.url)) return 'url';
 
-  if (
-    item.headRefName !== null && session.branch === item.headRefName
-    && !SHARED_BRANCHES.has(item.headRefName) && session.repo === repo
-  ) {
-    return 'branch';
-  }
+  if (branchMatches(session, item, repo)) return 'branch';
 
-  if (hashNumbers(text).has(item.number) && (session.repo === repo || itemsWithNumber === 1)) {
+  // A session in another repo never matches by number; one whose repo is unknown
+  // matches only when no other board item carries the same number.
+  if (
+    hashNumbers(text).has(item.number)
+    && (session.repo === repo || (session.repo === null && itemsWithNumber === 1))
+  ) {
     return 'number';
   }
   return null;

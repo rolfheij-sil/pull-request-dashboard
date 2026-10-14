@@ -11,6 +11,8 @@ interface FakeOptions {
   files?: Record<string, string>;
   /** Git answers by `<cwd> <subcommand>`. */
   git?: Record<string, string | Error>;
+  /** The clock the git cache reads, in epoch milliseconds. */
+  now?: () => number;
 }
 
 const fakeDeps = (options: FakeOptions) => {
@@ -31,6 +33,7 @@ const fakeDeps = (options: FakeOptions) => {
     readText: (path) => options.files?.[path] ?? null,
     env: {},
     homeDir: '/home/me',
+    now: options.now,
   };
   return { deps, calls };
 };
@@ -201,6 +204,96 @@ describe('listSessions', () => {
       git: { '/repo branch': 'main' },
     });
     expect((await listSessions({}, deps)).sessions[0]?.branch).toBe('wt-branch');
+  });
+});
+
+describe('listSessions git use', () => {
+  const gitCalls = (calls: { file: string; args: string[] }[], kind: 'branch' | 'remote') =>
+    calls.filter((c) => c.file === 'git' && (c.args[2] === 'rev-parse') === (kind === 'branch'));
+
+  it('never runs more than 8 git calls at once', async () => {
+    let running = 0;
+    let peak = 0;
+    const agents = Array.from({ length: 40 }, (_, i) => agent({
+      id: `id${i}`, sessionId: `s${i}`, cwd: `/repo/${i}`,
+    }));
+    const deps: ListDeps = {
+      exec: async (file) => {
+        if (file !== 'git') return JSON.stringify(agents);
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => { setTimeout(resolve, 2); });
+        running -= 1;
+        return 'x\n';
+      },
+      readText: () => null, env: {}, homeDir: '/home/me',
+    };
+    const { sessions } = await listSessions({}, deps);
+    expect(sessions).toHaveLength(40);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+  });
+
+  it('answers from the cache on the next listing instead of calling git again', async () => {
+    const { deps, calls } = fakeDeps({
+      agents: [agent()], git: { '/repo branch': 'pt-9-fix', '/repo remote': 'git@github.com:o/n.git' },
+    });
+    const first = (await listSessions({}, deps)).sessions[0];
+    const callsAfterFirst = calls.filter((c) => c.file === 'git').length;
+    const second = (await listSessions({}, deps)).sessions[0];
+    expect(callsAfterFirst).toBe(2);
+    expect(calls.filter((c) => c.file === 'git')).toHaveLength(2);
+    expect(second).toMatchObject({ branch: first?.branch, repo: 'o/n' });
+  });
+
+  it('asks again for the branch after 60 seconds and for the repo after 5 minutes', async () => {
+    let now = 1_000_000;
+    const { deps, calls } = fakeDeps({
+      agents: [agent()], now: () => now,
+      git: { '/repo branch': 'b', '/repo remote': 'git@github.com:o/n.git' },
+    });
+    await listSessions({}, deps);
+    now += 59_000;
+    await listSessions({}, deps);
+    expect([gitCalls(calls, 'branch').length, gitCalls(calls, 'remote').length]).toEqual([1, 1]);
+    now += 2_000;
+    await listSessions({}, deps);
+    expect([gitCalls(calls, 'branch').length, gitCalls(calls, 'remote').length]).toEqual([2, 1]);
+    now += 5 * 60_000;
+    await listSessions({}, deps);
+    expect([gitCalls(calls, 'branch').length, gitCalls(calls, 'remote').length]).toEqual([3, 2]);
+  });
+
+  it('keeps no cache between separate sets of deps', async () => {
+    const one = fakeDeps({ agents: [agent()], git: { '/repo branch': 'a' } });
+    const two = fakeDeps({ agents: [agent()], git: { '/repo branch': 'b' } });
+    expect((await listSessions({}, one.deps)).sessions[0]?.branch).toBe('a');
+    expect((await listSessions({}, two.deps)).sessions[0]?.branch).toBe('b');
+  });
+
+  it('skips the branch call for an ended session without a recorded branch', async () => {
+    const { deps, calls } = fakeDeps({
+      agents: [agent({ status: undefined, state: 'done' })],
+      git: { '/repo branch': 'pt-9-fix', '/repo remote': 'git@github.com:o/n.git' },
+    });
+    const [session] = (await listSessions({}, deps)).sessions;
+    expect(gitCalls(calls, 'branch')).toHaveLength(0);
+    expect(session).toMatchObject({ branch: null, branchSource: null, repo: 'o/n' });
+  });
+
+  it('skips the branch call when the job recorded a branch, and says where each branch came from', async () => {
+    const withJob = fakeDeps({
+      agents: [agent()],
+      files: { [`${CLAUDE_DIR}/jobs/abc12345/state.json`]: '{"worktreeBranch":"wt-branch"}' },
+      git: { '/repo branch': 'main' },
+    });
+    const [fromJob] = (await listSessions({}, withJob.deps)).sessions;
+    expect(gitCalls(withJob.calls, 'branch')).toHaveLength(0);
+    expect(fromJob).toMatchObject({ branch: 'wt-branch', branchSource: 'job' });
+
+    const live = fakeDeps({ agents: [agent()], git: { '/repo branch': 'pt-9-fix' } });
+    expect((await listSessions({}, live.deps)).sessions[0])
+      .toMatchObject({ branch: 'pt-9-fix', branchSource: 'git' });
   });
 });
 

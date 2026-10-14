@@ -46,8 +46,13 @@ export function createSessionService(
     findBySessionId: (sessionId) => listing.sessions.find((s) => s.sessionId === sessionId),
     refresh,
     start() {
-      void refresh();
-      timer = setInterval(() => void refresh(), SESSION_REFRESH_MS);
+      const refreshQuietly = (): void => {
+        refresh().catch((error: unknown) => {
+          console.error('Could not refresh the Claude Code session list:', error);
+        });
+      };
+      refreshQuietly();
+      timer = setInterval(refreshQuietly, SESSION_REFRESH_MS);
     },
     stop() {
       stopped = true;

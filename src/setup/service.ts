@@ -22,6 +22,8 @@ export type SaveResult =
 
 export interface SetupService {
   detected(): DetectedSetup;
+  /** True until the first detection has finished, and while a later one is running. */
+  detecting(): boolean;
   /** Detects again, including the folders live sessions are running in. */
   redetect(): Promise<void>;
   saved(): SavedSettings;
@@ -55,17 +57,26 @@ export function createSetupService(options: SetupOptions): SetupService {
   const { store, configSessions } = options;
   const liveSessions = options.liveSessions ?? (() => []);
   let detected = emptyDetection(deps);
+  let detectionsRunning = 0;
+  let everDetected = false;
 
   const effective = (): EffectiveSetup =>
     effectiveSessionsConfig(configSessions, detected, loadSaved(store), liveSessions());
 
   return {
     detected: () => detected,
+    detecting: () => detectionsRunning > 0 || !everDetected,
     async redetect() {
-      detected = await detectSetup(deps, {
-        repoPath: options.repoPath,
-        sessionCwds: [...new Set(liveSessions().map((s) => s.cwd))],
-      });
+      detectionsRunning += 1;
+      try {
+        detected = await detectSetup(deps, {
+          repoPath: options.repoPath,
+          sessionCwds: [...new Set(liveSessions().map((s) => s.cwd))],
+        });
+        everDetected = true;
+      } finally {
+        detectionsRunning -= 1;
+      }
     },
     saved: () => loadSaved(store),
     effective,
@@ -132,25 +143,34 @@ export function createSetupService(options: SetupOptions): SetupService {
         if (typeof value !== 'object' || value === null || Array.isArray(value)) {
           errors.repoPaths = 'must map "owner/name" to a folder';
         } else {
+          // The map replaces the saved one wholesale. Only entries that are new or
+          // changed are checked against the disk: an unchanged saved folder is kept
+          // even if it has since vanished, so an unrelated save cannot fail on it.
+          const currentlySaved = loadSaved(store).repoPaths ?? {};
           const kept: Record<string, string> = {};
           await Promise.all(Object.entries(value).map(async ([repo, folder]) => {
             const field = `repoPaths.${repo}`;
-            const [owner, name, ...rest] = repo.split('/');
-            if (
-              owner === undefined || name === undefined || rest.length > 0
-              || !isGithubName(owner) || !isGithubName(name)
-            ) {
-              errors[field] = 'must be written owner/name';
-            } else if (locked.has(`repoPaths.${repo.toLowerCase()}`)) {
-              errors[field] = 'is set in config.json';
-            } else if (typeof folder !== 'string') {
-              errors[field] = 'must be a folder path';
+            const key = repo.toLowerCase();
+            if (locked.has(`repoPaths.${key}`)) {
+              // config.json now decides this repo; whatever was saved for it is dropped.
             } else if (folder === '') {
               // An empty folder forgets the saved choice.
+            } else if (typeof folder === 'string' && currentlySaved[key] === folder) {
+              kept[key] = folder;
             } else {
-              const problem = await checkRepoFolder(deps, repo, folder);
-              if (problem === null) kept[repo.toLowerCase()] = folder;
-              else errors[field] = problem;
+              const [owner, name, ...rest] = repo.split('/');
+              if (
+                owner === undefined || name === undefined || rest.length > 0
+                || !isGithubName(owner) || !isGithubName(name)
+              ) {
+                errors[field] = 'must be written owner/name';
+              } else if (typeof folder !== 'string') {
+                errors[field] = 'must be a folder path';
+              } else {
+                const problem = await checkRepoFolder(deps, repo, folder);
+                if (problem === null) kept[key] = folder;
+                else errors[field] = problem;
+              }
             }
           }));
           accepted.repoPaths = kept;

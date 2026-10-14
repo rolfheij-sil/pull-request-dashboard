@@ -10,12 +10,34 @@ export const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\
 
 /**
  * The shell command that brings a session back: attaching to a background
- * session, or resuming an interactive one from the directory it ran in.
+ * session, or resuming an interactive one from the directory it ran in. Every
+ * value is quoted, and `cd --` keeps a directory starting with `-` from being
+ * read as an option.
  */
 export function copyCommand(session: Pick<LinkedSession, 'kind' | 'id' | 'sessionId' | 'cwd'>): string {
-  if (session.kind === 'background' && session.id !== null) return `claude attach ${session.id}`;
-  return `cd ${shellQuote(session.cwd)} && claude --resume ${session.sessionId}`;
+  if (session.kind === 'background' && session.id !== null) {
+    return `claude attach ${shellQuote(session.id)}`;
+  }
+  return `cd -- ${shellQuote(session.cwd)} && claude --resume ${shellQuote(session.sessionId)}`;
 }
+
+/** What a session is called on screen: its name, or its id when it has none. */
+export const sessionDisplayName = (session: Pick<LinkedSession, 'name' | 'sessionId'>): string =>
+  session.name || session.sessionId;
+
+/** The accessible name of a session button, which says which session it acts on. */
+export function actionAriaLabel(id: SessionActionId, sessionName: string): string {
+  switch (id) {
+    case 'claudeAi': return `Open ${sessionName} on claude.ai`;
+    case 'terminal': return `Open ${sessionName} in a terminal`;
+    case 'desktop': return `Open ${sessionName} in the desktop app`;
+    default: return `Copy command for ${sessionName}`;
+  }
+}
+
+/** The accessible name of the button that starts a session for a PR. */
+export const startSessionAriaLabel = (repo: string, number: number): string =>
+  `Start a session for ${repo} #${number}`;
 
 /** What a status dot looks like: busy, waiting (needs attention) and idle are alive; 'ended' has no process. */
 export type DotKind = 'busy' | 'waiting' | 'idle' | 'ended';
@@ -117,6 +139,16 @@ export interface SettingsDraft {
   repoPaths: Record<string, string>;
 }
 
+/** Whether two drafts hold the same choices. */
+export function sameDraft(a: SettingsDraft, b: SettingsDraft): boolean {
+  const keys = (paths: Record<string, string>) => Object.keys(paths).sort();
+  const pathsA = keys(a.repoPaths);
+  const pathsB = keys(b.repoPaths);
+  return a.primaryAction === b.primaryAction && a.terminalPreset === b.terminalPreset
+    && a.startPrompt === b.startPrompt && pathsA.length === pathsB.length
+    && pathsA.every((repo, i) => repo === pathsB[i] && a.repoPaths[repo] === b.repoPaths[repo]);
+}
+
 export function draftFrom(setup: SetupResponse): SettingsDraft {
   return {
     primaryAction: setup.effective.primaryAction,
@@ -126,9 +158,40 @@ export function draftFrom(setup: SetupResponse): SettingsDraft {
   };
 }
 
+/** One folder row of the settings panel. */
+export interface RepoRow {
+  repo: string;
+  /** False for a saved folder whose repo has no PR on the board right now. */
+  onBoard: boolean;
+}
+
+/** Every repo on the board, then the saved folders for repos that are not, so those can be changed or cleared. */
+export function repoRows(boardRepos: readonly string[], setup: SetupResponse): RepoRow[] {
+  const onBoard = new Set(boardRepos);
+  const offBoard = Object.keys(setup.saved.repoPaths ?? {})
+    .filter((repo) => !onBoard.has(repo)).sort();
+  return [
+    ...boardRepos.map((repo) => ({ repo, onBoard: true })),
+    ...offBoard.map((repo) => ({ repo, onBoard: false })),
+  ];
+}
+
+/**
+ * Errors from a rejected save that no field of the panel shows by itself,
+ * as `<field>: <message>` lines, so no rejection goes unseen.
+ */
+export function unownedErrors(
+  errors: Record<string, string>, shownFields: readonly string[],
+): string[] {
+  return Object.entries(errors)
+    .filter(([field]) => !shownFields.includes(field))
+    .map(([field, message]) => `${field}: ${message}`);
+}
+
 /**
  * Only what the user changed (or had already saved) is sent, so opening the
  * panel and saving does not pin detected defaults as if they were choices.
+ * Folders for repos that config.json sets are never sent: the server owns them.
  */
 export function buildPatch(setup: SetupResponse, draft: SettingsDraft, repos: string[]): SetupPatch {
   const { saved, effective, lockedByConfig } = setup;
@@ -151,12 +214,17 @@ export function buildPatch(setup: SetupResponse, draft: SettingsDraft, repos: st
   // The server replaces the saved folders wholesale, so start from what is saved
   // (including repos not on the board right now) and apply the rows' changes.
   const paths: Record<string, string> = { ...saved.repoPaths };
+  for (const repo of Object.keys(paths)) {
+    if (lockedByConfig.includes(`repoPaths.${repo}`)) delete paths[repo];
+  }
   for (const repo of repos) {
     if (lockedByConfig.includes(`repoPaths.${repo}`)) continue;
     const value = (draft.repoPaths[repo] ?? '').trim();
     if (value === '') delete paths[repo];
     else if (value !== effective.repoPaths[repo] || paths[repo] !== undefined) paths[repo] = value;
   }
-  if (Object.keys(paths).length > 0 || saved.repoPaths !== undefined) patch.repoPaths = paths;
+  if (Object.keys(paths).length > 0 || Object.keys(saved.repoPaths ?? {}).length > 0) {
+    patch.repoPaths = paths;
+  }
   return patch;
 }

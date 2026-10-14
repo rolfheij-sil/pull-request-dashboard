@@ -5,6 +5,9 @@ export type SessionState = 'working' | 'blocked' | 'done' | 'failed' | 'stopped'
 /** How strongly a session is tied to a PR, strongest first. */
 export type MatchedBy = 'recorded' | 'url' | 'branch' | 'number';
 
+/** `job`: the background job recorded its worktree branch; `git`: read from `cwd`'s checkout. */
+export type BranchSource = 'job' | 'git' | null;
+
 /** One local Claude Code session, as listed by `claude agents` and enriched from its on-disk records. */
 export interface SessionInfo {
   /** Short id used by `claude attach`; null for interactive sessions. */
@@ -20,6 +23,8 @@ export interface SessionInfo {
   startedAt: number;
   /** The checked-out branch of `cwd` (or the job's worktree branch); null when unknown. */
   branch: string | null;
+  /** Where `branch` came from: the job's own record, or `cwd`'s current checkout. */
+  branchSource: BranchSource;
   /** Lowercased `owner/name` of `cwd`'s origin remote; null when unknown. */
   repo: string | null;
   /** PRs the session recorded as its own, as lowercased `owner/name#n` keys. */

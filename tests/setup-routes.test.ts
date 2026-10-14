@@ -9,6 +9,7 @@ import type { ListDeps } from '../src/sessions/list.js';
 import { createSessionService } from '../src/sessions/service.js';
 import type { DetectDeps } from '../src/setup/detect.js';
 import { createSetupService } from '../src/setup/service.js';
+import { writeSaved } from '../src/setup/settings.js';
 import { openStore, type Store } from '../src/store/db.js';
 import type { Config, SessionsConfig } from '../src/types.js';
 
@@ -237,9 +238,47 @@ describe('PUT /api/setup', () => {
     const { errors } = response.json();
     expect(errors.terminalPreset).toMatch(/config\.json/);
     expect(errors.startPrompt).toMatch(/config\.json/);
-    expect(errors[`repoPaths.${HOME}`]).toMatch(/config\.json/);
+    expect(errors[`repoPaths.${HOME}`]).toBeUndefined();
     expect(errors['repoPaths.paranext/paratext-10-studio']).toBeUndefined();
     expect(h.setup.saved()).toEqual({});
+  });
+
+  it('keeps an unchanged saved folder without checking it, so an unrelated save succeeds', async () => {
+    h = await harness();
+    writeSaved(h.store, { repoPaths: { [HOME]: '/g/no-longer-there' } });
+    const response = await put({
+      primaryAction: 'copy', repoPaths: { [HOME]: '/g/no-longer-there' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(h.setup.saved()).toEqual({
+      primaryAction: 'copy', repoPaths: { [HOME]: '/g/no-longer-there' },
+    });
+  });
+
+  it('still checks a folder that is new or changed', async () => {
+    h = await harness();
+    writeSaved(h.store, { repoPaths: { [HOME]: '/g/core' } });
+    const changed = await put({ repoPaths: { [HOME]: '/g/missing' } });
+    expect(changed.statusCode).toBe(400);
+    expect(changed.json().errors[`repoPaths.${HOME}`]).toMatch(/exists/);
+    expect(h.setup.saved().repoPaths).toEqual({ [HOME]: '/g/core' });
+  });
+
+  it('drops a saved folder for a repo config.json has since taken over, without an error', async () => {
+    h = await harness({ configSessions: { repoPaths: { [HOME]: '/g/core' } } });
+    writeSaved(h.store, { repoPaths: { [HOME]: '/g/old' } });
+    const response = await put({ primaryAction: 'copy', repoPaths: { [HOME]: '/g/old' } });
+    expect(response.statusCode).toBe(200);
+    expect(h.setup.saved()).toEqual({ primaryAction: 'copy' });
+    expect(response.json().effective.repoPaths[HOME]).toBe('/g/core');
+  });
+
+  it('clears a stale saved folder for a repo that is not on the board', async () => {
+    h = await harness();
+    writeSaved(h.store, { repoPaths: { 'o/gone': '/g/gone', [HOME]: '/g/core' } });
+    const response = await put({ repoPaths: { 'o/gone': '', [HOME]: '/g/core' } });
+    expect(response.statusCode).toBe(200);
+    expect(h.setup.saved().repoPaths).toEqual({ [HOME]: '/g/core' });
   });
 
   it('rejects a body that is not an object', async () => {
@@ -249,6 +288,29 @@ describe('PUT /api/setup', () => {
       payload: '["copy"]',
     });
     expect(response.statusCode).toBe(400);
+  });
+});
+
+describe('detection progress', () => {
+  it('reports detecting until the first detection has finished', async () => {
+    const store = openStore(':memory:', HOME);
+    const setup = createSetupService({
+      configSessions: undefined, repoPath: '/g/core', store, deps: machine('linux'),
+    });
+    expect(setup.detecting()).toBe(true);
+    expect(setup.detected().claude.path).toBeNull();
+    const running = setup.redetect();
+    expect(setup.detecting()).toBe(true);
+    await running;
+    expect(setup.detecting()).toBe(false);
+    expect(setup.detected().claude.path).toBe('/bin/claude');
+    store.close();
+  });
+
+  it('puts the flag in the setup response', async () => {
+    h = await harness();
+    const body = (await h.app.inject({ method: 'GET', url: '/api/setup' })).json();
+    expect(body.detecting).toBe(false);
   });
 });
 
@@ -294,6 +356,25 @@ describe('POST /api/sessions/:id/open-desktop', () => {
     h = await harness({ platform: 'linux' });
     expect((await open('abc12345')).statusCode).toBe(404);
     expect(h.runner.spawnDetached).not.toHaveBeenCalled();
+  });
+
+  it('resolves {claudeCommand} in a detected terminal to the detected CLI', async () => {
+    h = await harness({ platform: 'darwin' });
+    await h.app.inject({
+      method: 'POST', url: '/api/sessions/abc12345/open-terminal', headers: ALLOWED,
+    });
+    const argv = h.runner.spawnDetached.mock.calls[0]!;
+    expect(argv[0]).toBe('osascript');
+    expect((argv[1] as string[]).slice(-3)).toEqual(['/work', '/bin/claude', 'abc12345']);
+  });
+
+  it('resolves {claudeCommand} in a detected terminal to the CLI config.json names', async () => {
+    h = await harness({ platform: 'darwin', configSessions: { claudeCommand: '/opt/claude' } });
+    await h.app.inject({
+      method: 'POST', url: '/api/sessions/abc12345/open-terminal', headers: ALLOWED,
+    });
+    const argv = h.runner.spawnDetached.mock.calls[0]!;
+    expect((argv[1] as string[]).slice(-3)).toEqual(['/work', '/opt/claude', 'abc12345']);
   });
 
   it('uses the CLI named in config.json', async () => {

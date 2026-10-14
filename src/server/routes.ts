@@ -6,7 +6,7 @@ import type { SetupService } from '../setup/service.js';
 import { prKey } from '../pr-key.js';
 import { attachSessions, findRepoPath } from '../sessions/match.js';
 import type { SessionService } from '../sessions/service.js';
-import { fillTemplate } from '../sessions/template.js';
+import { fillArgv, shellQuote } from '../sessions/template.js';
 import { startPreview } from '../sessions/start.js';
 import { requireDashboardRequest } from './csrf.js';
 import { isGithubName, parsePrNumber } from './params.js';
@@ -53,6 +53,7 @@ function setupResponse(setup: SetupService) {
   const effective = setup.effective();
   return {
     detected: setup.detected(),
+    detecting: setup.detecting(),
     saved: setup.saved(),
     effective: {
       primaryAction: effective.primaryAction,
@@ -67,6 +68,24 @@ function setupResponse(setup: SetupService) {
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+/** Only a CLI killed by the start timeout can have created a session without saying so. */
+const wasKilled = (error: unknown): boolean =>
+  typeof error === 'object' && error !== null
+  && (('killed' in error && error.killed === true)
+    || ('signal' in error && typeof error.signal === 'string' && error.signal !== ''));
+
+/** Everything the failed CLI printed or the launcher reported, for matching known failures. */
+function failureText(error: unknown): string {
+  const parts = [errorMessage(error)];
+  if (typeof error === 'object' && error !== null) {
+    for (const key of ['stderr', 'stdout'] as const) {
+      const value = (error as Record<string, unknown>)[key];
+      if (typeof value === 'string') parts.push(value);
+    }
+  }
+  return parts.join('\n');
+}
 
 const truncate = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1)}…`;
@@ -156,6 +175,13 @@ export function registerRoutes(
       const session = on.service.findById(request.params.id);
       if (session === undefined) return reply.code(404).send({ error: 'unknown session' });
 
+      // A line break or NUL in a folder name cannot be passed on safely.
+      if (/[\r\n\0]/.test(session.cwd)) {
+        return reply.code(400).send({
+          error: "this session's folder name contains a line break or NUL character, so a terminal cannot be opened for it",
+        });
+      }
+
       const values = {
         id: session.id ?? '',
         sessionId: session.sessionId,
@@ -163,7 +189,7 @@ export function registerRoutes(
         name: session.name,
         claudeCommand: on.config.claudeCommand ?? 'claude',
       };
-      const argv = command.map((element) => fillTemplate(element, values));
+      const argv = fillArgv(command, values);
       try {
         await runner.spawnDetached(argv[0]!, argv.slice(1));
       } catch (error) {
@@ -269,8 +295,26 @@ export function registerRoutes(
         await on.service.refresh();
         return reply.send({ ok: true, output: truncate(stdout.trim(), OUTPUT_MAX_CHARS) });
       } catch (error) {
+        const text = failureText(error);
+        const message = truncate(text, OUTPUT_MAX_CHARS);
+        if (wasKilled(error)) {
+          // A timeout may come after the session was created, so the cooldown
+          // stays to keep a retry from starting a duplicate.
+          return reply.code(500).send({
+            error: `${message} — the session may still have started; check the board in a few seconds`,
+          });
+        }
+        // The CLI could not start, or ran and reported that it started nothing.
         lastStartedAt.delete(key);
-        return reply.code(500).send({ error: truncate(errorMessage(error), OUTPUT_MAX_CHARS) });
+        if (/workspace not trusted/i.test(text)) {
+          // Trust is the user's to grant; the server never edits Claude Code's settings.
+          return reply.code(409).send({
+            error: 'untrusted-workspace',
+            folder: repoPath,
+            command: `cd -- ${shellQuote(repoPath)} && claude`,
+          });
+        }
+        return reply.code(500).send({ error: message });
       }
     },
   );

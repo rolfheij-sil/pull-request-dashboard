@@ -29,6 +29,8 @@ export interface BoardItem extends Classification {
   checkDot: 'fail' | 'pending' | 'pass' | 'none';
   /** The PR's head branch; null when unknown. Sessions on that branch are linked to the PR. */
   headRefName: string | null;
+  /** The head branch lives in a fork; its name is then no evidence about a local checkout. */
+  isCrossRepository: boolean;
   /** Local Claude Code sessions working on this PR. Filled in by `attachSessions`. */
   sessions: LinkedSession[];
   /** A local clone is configured for this PR's repo, so a session can be started for it. */
@@ -136,6 +138,7 @@ export function buildBoard(
     isDraft: pr.isDraft,
     checkDot: checkDot(pr.checks),
     headRefName: pr.headRefName ?? null,
+    isCrossRepository: pr.isCrossRepository ?? false,
     sessions: [],
     canStartSession: false,
     startPreview: null,

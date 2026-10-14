@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import {
-  openSessionDesktop, openSessionTerminal, startSession,
+  openSessionDesktop, openSessionTerminal, startSession, UntrustedWorkspaceError,
   type Board, type BoardItem, type LinkedSession,
 } from './api';
+import { useAnnounce } from './announce';
 import {
-  copyCommand, dotKind, MATCH_HINT, orderActions, splitSessions, statusLabel,
-  type SessionActionId,
+  actionAriaLabel, copyCommand, dotKind, MATCH_HINT, orderActions, sessionDisplayName,
+  splitSessions, startSessionAriaLabel, statusLabel, type SessionActionId,
 } from './sessions';
 
 async function copyText(text: string): Promise<void> {
@@ -28,19 +29,40 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-/** Runs `action` and tracks its phase; with `resetMs`, a finished or failed phase returns to idle after that long. */
-function useAction(action: () => Promise<void>, resetMs?: number) {
+const errorText = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/** The most of a failed start's output the card shows. */
+const START_ERROR_MAX_CHARS = 300;
+
+/** What a button announces to screen readers while it runs and when it ends. */
+interface Announcements {
+  pending?: string;
+  done: string;
+  /** The message for a failure, given the error's text. */
+  failed: (reason: string) => string;
+}
+
+/**
+ * Runs `action`, tracks its phase and announces the outcome; with `resetMs`, a
+ * finished or failed phase returns to idle after that long.
+ */
+function useAction(action: () => Promise<void>, announcements: Announcements, resetMs?: number) {
+  const announce = useAnnounce();
   const [phase, setPhase] = useState<'idle' | 'pending' | 'done' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (timer.current !== null) clearTimeout(timer.current); }, []);
 
   const run = async () => {
     setPhase('pending');
+    if (announcements.pending !== undefined) announce(announcements.pending);
     let next: 'done' | 'failed' = 'done';
     try {
       await action();
-    } catch {
+      announce(announcements.done);
+    } catch (error) {
       next = 'failed';
+      announce(announcements.failed(errorText(error)));
     }
     setPhase(next);
     if (resetMs !== undefined) {
@@ -60,11 +82,24 @@ function SessionRow({ session, options }: {
   session: LinkedSession;
   options: RowOptions;
 }) {
-  const copy = useAction(() => copyText(copyCommand(session)), 2000);
+  const name = sessionDisplayName(session);
+  const whyId = useId();
+  const copy = useAction(() => copyText(copyCommand(session)), {
+    done: `Copied the command for ${name}`,
+    failed: (reason) => `Failed: could not copy the command for ${name} — ${reason}`,
+  }, 2000);
   const terminal = useAction(async () => {
     if (session.id !== null) await openSessionTerminal(session.id);
+  }, {
+    pending: `Opening ${name} in a terminal…`,
+    done: `Opened ${name} in a terminal`,
+    failed: (reason) => `Failed: could not open ${name} in a terminal — ${reason}`,
   }, 3000);
-  const desktop = useAction(() => openSessionDesktop(session.sessionId), 3000);
+  const desktop = useAction(() => openSessionDesktop(session.sessionId), {
+    pending: `Opening ${name} in the desktop app…`,
+    done: `Opened ${name} in the desktop app`,
+    failed: (reason) => `Failed: could not open ${name} in the desktop app — ${reason}`,
+  }, 3000);
   const label = statusLabel(session);
 
   const available: SessionActionId[] = ['copy'];
@@ -74,17 +109,21 @@ function SessionRow({ session, options }: {
 
   const button = (id: SessionActionId, primary: boolean) => {
     const className = primary ? 'session-button session-button-primary' : 'session-button';
+    const ariaLabel = actionAriaLabel(id, name);
     switch (id) {
       case 'claudeAi':
         return (
-          <a key={id} className={className} href={session.claudeAiUrl ?? undefined} target="_blank" rel="noreferrer">
+          <a
+            key={id} className={className} aria-label={ariaLabel}
+            href={session.claudeAiUrl ?? undefined} target="_blank" rel="noreferrer"
+          >
             claude.ai
           </a>
         );
       case 'terminal':
         return (
           <button
-            key={id} type="button" className={className}
+            key={id} type="button" className={className} aria-label={ariaLabel}
             disabled={terminal.phase === 'pending'}
             onClick={() => void terminal.run()}
           >
@@ -96,7 +135,7 @@ function SessionRow({ session, options }: {
       case 'desktop':
         return (
           <button
-            key={id} type="button" className={className}
+            key={id} type="button" className={className} aria-label={ariaLabel}
             disabled={desktop.phase === 'pending'}
             onClick={() => void desktop.run()}
           >
@@ -107,7 +146,10 @@ function SessionRow({ session, options }: {
         );
       default:
         return (
-          <button key={id} type="button" className={className} onClick={() => void copy.run()}>
+          <button
+            key={id} type="button" className={className} aria-label={ariaLabel}
+            onClick={() => void copy.run()}
+          >
             {copy.phase === 'done' ? 'Copied' : copy.phase === 'failed' ? 'Copy failed' : 'Copy'}
           </button>
         );
@@ -115,15 +157,11 @@ function SessionRow({ session, options }: {
   };
 
   return (
-    <li className="session" title={MATCH_HINT[session.matchedBy]}>
-      <span
-        className={`session-dot session-dot-${dotKind(session.status)}`}
-        role="img"
-        aria-label={label}
-        title={label}
-      />
-      <span className="session-name">{session.name || session.sessionId}</span>
+    <li className="session" title={MATCH_HINT[session.matchedBy]} aria-describedby={whyId}>
+      <span className={`session-dot session-dot-${dotKind(session.status)}`} aria-hidden="true" />
+      <span className="session-name">{name}</span>
       <span className="session-status">{label}</span>
+      <span id={whyId} className="visually-hidden">{MATCH_HINT[session.matchedBy]}</span>
       <span className="session-actions">
         {orderActions(options.primaryAction, available).map(({ id, primary }) => button(id, primary))}
       </span>
@@ -131,8 +169,33 @@ function SessionRow({ session, options }: {
   );
 }
 
+/** The one-time fix for a folder Claude Code has not been allowed to work in. */
+function TrustHelp({ repo, error }: { repo: string; error: UntrustedWorkspaceError }) {
+  const copy = useAction(() => copyText(error.command), {
+    done: `Copied the trust command for ${repo}`,
+    failed: (reason) => `Failed: could not copy the trust command for ${repo} — ${reason}`,
+  }, 2000);
+  return (
+    <div className="session-message">
+      <p>
+        Claude Code hasn't been allowed to work in {error.folder} yet. Run this once in a
+        terminal and accept the trust prompt, then try again:
+      </p>
+      <code>{error.command}</code>{' '}
+      <button
+        type="button" className="session-button" aria-label={`Copy trust command for ${repo}`}
+        onClick={() => void copy.run()}
+      >
+        {copy.phase === 'done' ? 'Copied' : copy.phase === 'failed' ? 'Copy failed' : 'Copy'}
+      </button>
+    </div>
+  );
+}
+
 function StartSession({ item, onStarted }: { item: BoardItem; onStarted: () => void }) {
+  const announce = useAnnounce();
   const [message, setMessage] = useState<string | null>(null);
+  const [untrusted, setUntrusted] = useState<UntrustedWorkspaceError | null>(null);
   const [pending, setPending] = useState(false);
   const preview = item.startPreview;
 
@@ -143,12 +206,29 @@ function StartSession({ item, onStarted }: { item: BoardItem; onStarted: () => v
     if (!window.confirm(question)) return;
     setPending(true);
     setMessage(null);
+    setUntrusted(null);
+    announce(`Starting a session for ${item.repo} #${item.number}…`);
     try {
       const output = await startSession(item.repo, item.number);
-      setMessage(output === '' ? 'Session started.' : output);
+      const text = output === '' ? 'Session started.' : output;
+      setMessage(text);
+      announce(`Session started for ${item.repo} #${item.number}`);
       onStarted();
     } catch (error) {
-      setMessage(`Could not start a session — ${error instanceof Error ? error.message : String(error)}`);
+      if (error instanceof UntrustedWorkspaceError) {
+        setUntrusted(error);
+        announce(
+          `Claude Code hasn't been allowed to work in ${error.folder} yet. `
+          + `Run ${error.command} once in a terminal and accept the trust prompt, then try again.`,
+        );
+      } else {
+        const reason = errorText(error);
+        const shown = reason.length <= START_ERROR_MAX_CHARS
+          ? reason : `${reason.slice(0, START_ERROR_MAX_CHARS - 1)}…`;
+        const text = `Could not start a session — ${shown}`;
+        setMessage(text);
+        announce(`Failed: ${text}`);
+      }
     } finally {
       setPending(false);
     }
@@ -156,10 +236,15 @@ function StartSession({ item, onStarted }: { item: BoardItem; onStarted: () => v
 
   return (
     <div className="start-session">
-      <button type="button" className="session-button" disabled={pending} onClick={() => void start()}>
+      <button
+        type="button" className="session-button" disabled={pending}
+        aria-label={startSessionAriaLabel(item.repo, item.number)}
+        onClick={() => void start()}
+      >
         {pending ? 'Starting…' : 'Start session'}
       </button>
       {message !== null && <span className="session-message">{message}</span>}
+      {untrusted !== null && <TrustHelp repo={item.repo} error={untrusted} />}
     </div>
   );
 }

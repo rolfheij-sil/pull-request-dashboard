@@ -20,7 +20,7 @@ const detected = (over: Partial<DetectedSetup> = {}): DetectedSetup => ({
 
 const session = (over: Partial<SessionInfo> = {}): SessionInfo => ({
   id: 'x', sessionId: 's', name: 'n', kind: 'background', status: 'busy', state: 'working',
-  cwd: '/', startedAt: 1, branch: null, repo: null, prLinks: [], intent: '', claudeAiUrl: null, ...over,
+  cwd: '/', startedAt: 1, branch: null, branchSource: null, repo: null, prLinks: [], intent: '', claudeAiUrl: null, ...over,
 });
 
 describe('effectiveSessionsConfig: terminal', () => {

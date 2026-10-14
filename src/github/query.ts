@@ -30,6 +30,7 @@ const PR_FIELDS = `
   }
   headRefOid
   headRefName
+  isCrossRepository
   statusCheckRollup: commits(last: 1) {
     nodes {
       commit {

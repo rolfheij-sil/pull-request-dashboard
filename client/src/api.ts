@@ -82,11 +82,12 @@ const WRITE_HEADERS = { 'x-pr-dashboard': '1' };
 export const markPostedToDiscord = async (
   repo: string, number: number, posted: boolean,
 ): Promise<void> => {
-  await fetch(`/api/pr/${repo}/${number}/discord`, {
+  const response = await fetch(`/api/pr/${repo}/${number}/discord`, {
     method: 'POST',
     headers: { ...WRITE_HEADERS, 'content-type': 'application/json' },
     body: JSON.stringify({ posted }),
   });
+  if (!response.ok) throw new Error(`API returned ${response.status}`);
 };
 
 export const openSessionTerminal = async (id: string): Promise<void> => {
@@ -97,13 +98,28 @@ export const openSessionTerminal = async (id: string): Promise<void> => {
   if (!response.ok) throw new Error(`API returned ${response.status}`);
 };
 
+/** Claude Code has not been allowed to work in the repo's folder yet; the user must run `command` once. */
+export class UntrustedWorkspaceError extends Error {
+  constructor(readonly folder: string, readonly command: string) {
+    super(`Claude Code has not been allowed to work in ${folder}`);
+  }
+}
+
 /** Resolves with the CLI's output; rejects with the server's error message. */
 export const startSession = async (repo: string, number: number): Promise<string> => {
   const response = await fetch(`/api/pr/${repo}/${number}/start-session`, {
     method: 'POST',
     headers: WRITE_HEADERS,
   });
-  const body = (await response.json().catch(() => ({}))) as { output?: string; error?: string };
+  const body = (await response.json().catch(() => ({}))) as {
+    output?: string; error?: string; folder?: string; command?: string;
+  };
+  if (
+    response.status === 409 && body.error === 'untrusted-workspace'
+    && typeof body.folder === 'string' && typeof body.command === 'string'
+  ) {
+    throw new UntrustedWorkspaceError(body.folder, body.command);
+  }
   if (!response.ok) throw new Error(body.error ?? `API returned ${response.status}`);
   return body.output ?? '';
 };
@@ -127,6 +143,8 @@ export interface DetectedSetup {
 
 export interface SetupResponse {
   detected: DetectedSetup;
+  /** Detection has not finished yet, so `detected` may be empty or out of date. */
+  detecting: boolean;
   saved: {
     primaryAction?: PrimaryAction;
     terminalPreset?: string;
