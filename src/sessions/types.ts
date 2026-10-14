@@ -42,9 +42,14 @@ export interface LinkedSession {
   claudeAiUrl: string | null;
 }
 
+/** The button each card puts first. */
+export type PrimaryAction = 'claudeAi' | 'terminal' | 'desktop' | 'copy';
+
 export interface SessionActions {
-  /** An `openTerminalCommand` is configured. */
+  /** A terminal command is available (configured or detected). */
   openTerminal: boolean;
+  /** The Claude desktop app can resume a session on this machine. */
+  openDesktop: boolean;
   /** At least one repo has a `repoPaths` entry. */
   startSession: boolean;
 }

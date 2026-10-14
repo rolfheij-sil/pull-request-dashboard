@@ -9,14 +9,21 @@ export interface SessionService {
   snapshot(): SessionListing;
   /** Finds a listed session by its short id (the `claude attach` id). */
   findById(id: string): SessionInfo | undefined;
+  /** Finds a listed session by its full session id (interactive sessions have no short id). */
+  findBySessionId(sessionId: string): SessionInfo | undefined;
   /** Re-lists now; concurrent calls share one run. */
   refresh(): Promise<void>;
   start(): void;
   stop(): void;
 }
 
+/**
+ * `config` may be a function, read on every refresh, so settings changed in the
+ * panel and a late-detected CLI path take effect without a restart. A config
+ * with `enabled: false` lists nothing and runs nothing.
+ */
 export function createSessionService(
-  cfg: SessionsConfig, deps: ListDeps = defaultListDeps,
+  config: SessionsConfig | (() => SessionsConfig), deps: ListDeps = defaultListDeps,
 ): SessionService {
   let listing: SessionListing = { sessions: [], error: null };
   let timer: NodeJS.Timeout | null = null;
@@ -24,7 +31,10 @@ export function createSessionService(
   let stopped = false;
 
   const refresh = (): Promise<void> => {
-    inFlight ??= listSessions(cfg, deps)
+    const cfg = typeof config === 'function' ? config() : config;
+    inFlight ??= (cfg.enabled === false
+      ? Promise.resolve<SessionListing>({ sessions: [], error: null })
+      : listSessions(cfg, deps))
       .then((next) => { if (!stopped) listing = next; })
       .finally(() => { inFlight = null; });
     return inFlight;
@@ -33,6 +43,7 @@ export function createSessionService(
   return {
     snapshot: () => listing,
     findById: (id) => listing.sessions.find((s) => s.id === id),
+    findBySessionId: (sessionId) => listing.sessions.find((s) => s.sessionId === sessionId),
     refresh,
     start() {
       void refresh();

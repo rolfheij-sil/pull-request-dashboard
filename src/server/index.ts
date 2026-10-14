@@ -2,7 +2,8 @@ import Fastify from 'fastify';
 import { loadConfig } from '../config.js';
 import { notificationsSupported } from '../notify/osascript.js';
 import { openStore } from '../store/db.js';
-import { createSessionService } from '../sessions/service.js';
+import { createSessionService, type SessionService } from '../sessions/service.js';
+import { createSetupService } from '../setup/service.js';
 import { createPoller } from './poller.js';
 import { registerRoutes } from './routes.js';
 
@@ -21,18 +22,27 @@ if (!notificationsSupported()) {
   );
 }
 
-const sessionsConfig = config.sessions?.enabled === false ? undefined : config.sessions;
-const sessionService = sessionsConfig === undefined ? undefined : createSessionService(sessionsConfig);
+// Anything in config.json's `sessions` block wins over the panel's saved
+// choices, which win over what is detected on this machine. The setup needs
+// the live sessions (for clone discovery) and the sessions need the setup (for
+// the CLI path), hence the late binding.
+let sessionService: SessionService | undefined;
+const setup = createSetupService({
+  configSessions: config.sessions,
+  repoPath: config.repoPath,
+  store,
+  liveSessions: () => sessionService?.snapshot().sessions ?? [],
+});
+await setup.redetect();
+sessionService = createSessionService(() => setup.effective().sessions);
 
 const app = Fastify({ logger: { level: 'warn' } });
-registerRoutes(app, poller, store, {
-  sessions: sessionService === undefined || sessionsConfig === undefined
-    ? undefined
-    : { service: sessionService, config: sessionsConfig },
-});
+registerRoutes(app, poller, store, { sessions: sessionService, setup });
 
 poller.start();
-sessionService?.start();
+sessionService.start();
+// Once the first listing is in, look again so clones that live sessions run in are found.
+void sessionService.refresh().then(() => setup.redetect());
 
 const port = Number(process.env.PORT ?? 5174);
 await app.listen({ port, host: '127.0.0.1' });

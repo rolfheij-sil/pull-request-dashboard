@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import type { SetupResponse } from '../client/src/api.js';
 import {
-  copyCommand, dotKind, shellQuote, splitSessions, statusLabel, VISIBLE_SESSIONS,
+  buildPatch, copyCommand, dotKind, draftFrom, orderActions, platformLabel,
+  primaryActionChoices, shellQuote, splitSessions, statusLabel, VISIBLE_SESSIONS,
 } from '../client/src/sessions.js';
 import { fillTemplate, unknownPlaceholders } from '../src/sessions/template.js';
 
@@ -73,5 +75,83 @@ describe('templates', () => {
 
   it('lists unknown placeholders once each', () => {
     expect(unknownPlaceholders('{id} {x} {x} {y}', ['id'])).toEqual(['x', 'y']);
+  });
+});
+
+describe('orderActions', () => {
+  it('puts the primary action first and marks only it as main', () => {
+    expect(orderActions('terminal', ['copy', 'claudeAi', 'terminal'])).toEqual([
+      { id: 'terminal', primary: true },
+      { id: 'claudeAi', primary: false },
+      { id: 'copy', primary: false },
+    ]);
+  });
+
+  it('keeps a fixed order for the rest, and has no main button when the primary is unavailable', () => {
+    expect(orderActions('terminal', ['copy', 'desktop', 'claudeAi'])).toEqual([
+      { id: 'claudeAi', primary: false },
+      { id: 'desktop', primary: false },
+      { id: 'copy', primary: false },
+    ]);
+  });
+});
+
+describe('settings panel helpers', () => {
+  it('labels platforms', () => {
+    expect(platformLabel('wsl', 'Ubuntu')).toBe('WSL (Ubuntu)');
+    expect(platformLabel('wsl', null)).toBe('WSL');
+    expect(platformLabel('darwin', null)).toBe('macOS');
+    expect(platformLabel('win32', null)).toBe('Windows');
+    expect(platformLabel('linux', null)).toBe('Linux');
+  });
+
+  it('disables unavailable choices with a reason', () => {
+    const none = primaryActionChoices(false, false);
+    expect(none.find((c) => c.id === 'terminal')?.disabledReason).toMatch(/terminal/i);
+    expect(none.find((c) => c.id === 'desktop')?.disabledReason).toMatch(/macOS and Windows/);
+    expect(none.find((c) => c.id === 'copy')?.disabledReason).toBeNull();
+    expect(primaryActionChoices(true, true).every((c) => c.disabledReason === null)).toBe(true);
+  });
+
+  const setup = (over: Partial<SetupResponse> = {}): SetupResponse => ({
+    detected: {
+      platform: 'linux', wslDistro: null, desktopResume: false, repoClones: {},
+      claude: { path: '/c', version: '1', reason: null },
+      terminals: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
+    },
+    saved: {},
+    effective: {
+      primaryAction: 'terminal', terminalPreset: 'a', repoPaths: { 'o/x': '/d/x' },
+      startPrompt: 'P', openTerminalSource: 'detected',
+    },
+    lockedByConfig: [],
+    ...over,
+  });
+
+  it('sends nothing when the user changed nothing and nothing was saved', () => {
+    const s = setup();
+    expect(buildPatch(s, draftFrom(s), ['o/x'])).toEqual({});
+  });
+
+  it('sends only what changed', () => {
+    const s = setup();
+    const draft = { ...draftFrom(s), primaryAction: 'copy' as const, terminalPreset: 'b' };
+    expect(buildPatch(s, draft, ['o/x'])).toEqual({ primaryAction: 'copy', terminalPreset: 'b' });
+  });
+
+  it('keeps saved folders for repos not on the board and applies the rows', () => {
+    const s = setup({ saved: { repoPaths: { 'o/gone': '/g', 'o/x': '/old' } } });
+    const draft = draftFrom(s);
+    draft.repoPaths['o/x'] = '/new';
+    expect(buildPatch(s, draft, ['o/x'])).toEqual({ repoPaths: { 'o/gone': '/g', 'o/x': '/new' } });
+    draft.repoPaths['o/x'] = '';
+    expect(buildPatch(s, draft, ['o/x'])).toEqual({ repoPaths: { 'o/gone': '/g' } });
+  });
+
+  it('never sends fields config.json locks', () => {
+    const s = setup({ lockedByConfig: ['terminalPreset', 'startPrompt', 'repoPaths.o/x'] });
+    const draft = { ...draftFrom(s), terminalPreset: 'b', startPrompt: 'Q' };
+    draft.repoPaths['o/x'] = '/changed';
+    expect(buildPatch(s, draft, ['o/x'])).toEqual({});
   });
 });

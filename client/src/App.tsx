@@ -4,6 +4,8 @@ import {
   BUCKET_LABEL, BUCKET_ORDER, EXPANDED, REVIEW_BUCKET_LABEL, REVIEW_BUCKET_ORDER,
 } from './buckets';
 import { Card } from './Card';
+import type { RowOptions } from './SessionRows';
+import { SettingsPanel } from './SettingsPanel';
 import { notificationPermission, showNewNotifications } from './notifications';
 
 type Tab = 'mine' | 'others';
@@ -60,12 +62,12 @@ function NotificationControl() {
   );
 }
 
-function BucketSections({ order, labels, items, asOf, canOpenTerminal, onChange }: {
+function BucketSections({ order, labels, items, asOf, sessionOptions, onChange }: {
   order: readonly string[];
   labels: Record<string, string>;
   items: BoardItem[];
   asOf: number;
-  canOpenTerminal: boolean;
+  sessionOptions: RowOptions;
   onChange: () => void;
 }) {
   return (
@@ -80,7 +82,7 @@ function BucketSections({ order, labels, items, asOf, canOpenTerminal, onChange 
                 key={`${item.repo}#${item.number}`}
                 item={item}
                 now={asOf}
-                canOpenTerminal={canOpenTerminal}
+                sessionOptions={sessionOptions}
                 onChange={onChange}
               />
             ))}
@@ -111,6 +113,7 @@ export function App() {
   const [board, setBoard] = useState<Board | null>(null);
   const [failed, setFailed] = useState(false);
   const [tab, setTab] = useState<Tab>(readStoredTab);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const selectTab = (next: Tab) => {
     setTab(next);
@@ -158,10 +161,33 @@ export function App() {
   // the verdicts computed at that moment. Only the pre-first-poll shell has no
   // `fetchedAt`, and it has no cards to age.
   const asOf = board.fetchedAt === null ? Date.now() : Date.parse(board.fetchedAt);
+  const sessionOptions: RowOptions = {
+    actions: board.sessionActions, primaryAction: board.primaryAction,
+  };
+  const repos = [...new Set(
+    [...board.items, ...board.reviewing].map((item) => item.repo.toLowerCase()),
+  )].sort();
 
   return (
     <main>
-      <h1>{board.yourCourtCount} in your court</h1>
+      <div className="title-row">
+        <h1>{board.yourCourtCount} in your court</h1>
+        <button
+          type="button"
+          className="gear"
+          aria-label="Claude Code session settings"
+          title="Claude Code session settings"
+          onClick={() => setSettingsOpen(true)}
+        >
+          ⚙
+        </button>
+      </div>
+      <SettingsPanel
+        open={settingsOpen}
+        repos={repos}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={() => void load()}
+      />
       <p className="summary">{summaryLine(board)}</p>
       <NotificationControl />
       {board.sessionsError !== null && (
@@ -213,7 +239,7 @@ export function App() {
           labels={BUCKET_LABEL}
           items={board.items}
           asOf={asOf}
-          canOpenTerminal={board.sessionActions.openTerminal}
+          sessionOptions={sessionOptions}
           onChange={() => void load()}
         />
 
@@ -248,7 +274,7 @@ export function App() {
             labels={REVIEW_BUCKET_LABEL}
             items={board.reviewing}
             asOf={asOf}
-            canOpenTerminal={board.sessionActions.openTerminal}
+            sessionOptions={sessionOptions}
             onChange={() => void load()}
           />
         )}

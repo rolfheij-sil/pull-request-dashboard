@@ -1,3 +1,5 @@
+export type PrimaryAction = 'claudeAi' | 'terminal' | 'desktop' | 'copy';
+
 export type SessionStatus = 'busy' | 'waiting' | 'idle';
 
 export interface LinkedSession {
@@ -59,7 +61,9 @@ export interface Board {
   epoch: string;
   /** Why Claude Code sessions are unavailable; null when they are available or the feature is off. */
   sessionsError: string | null;
-  sessionActions: { openTerminal: boolean; startSession: boolean };
+  sessionActions: { openTerminal: boolean; openDesktop: boolean; startSession: boolean };
+  /** The session button each card puts first. */
+  primaryAction: PrimaryAction;
 }
 
 export const fetchBoard = async (): Promise<Board> => {
@@ -102,4 +106,83 @@ export const startSession = async (repo: string, number: number): Promise<string
   const body = (await response.json().catch(() => ({}))) as { output?: string; error?: string };
   if (!response.ok) throw new Error(body.error ?? `API returned ${response.status}`);
   return body.output ?? '';
+};
+
+export interface TerminalPreset { id: string; label: string }
+
+export interface DetectedSetup {
+  platform: 'wsl' | 'linux' | 'darwin' | 'win32';
+  wslDistro: string | null;
+  claude: { path: string | null; version: string | null; reason: string | null };
+  terminals: TerminalPreset[];
+  desktopResume: boolean;
+  /** Lowercased `owner/name` to candidate clone folders, best first. */
+  repoClones: Record<string, string[]>;
+}
+
+export interface SetupResponse {
+  detected: DetectedSetup;
+  saved: {
+    primaryAction?: PrimaryAction;
+    terminalPreset?: string;
+    repoPaths?: Record<string, string>;
+    startPrompt?: string;
+  };
+  effective: {
+    primaryAction: PrimaryAction;
+    terminalPreset: string | null;
+    repoPaths: Record<string, string>;
+    startPrompt: string;
+    openTerminalSource: 'config' | 'panel' | 'detected' | 'none';
+  };
+  /** `terminalPreset`, `startPrompt` and `repoPaths.<owner/name>` set in config.json. */
+  lockedByConfig: string[];
+}
+
+export interface SetupPatch {
+  primaryAction?: PrimaryAction;
+  terminalPreset?: string | null;
+  repoPaths?: Record<string, string>;
+  startPrompt?: string;
+}
+
+export const fetchSetup = async (): Promise<SetupResponse> => {
+  const response = await fetch('/api/setup');
+  if (!response.ok) throw new Error(`API returned ${response.status}`);
+  return (await response.json()) as SetupResponse;
+};
+
+export const redetectSetup = async (): Promise<SetupResponse> => {
+  const response = await fetch('/api/setup/redetect', { method: 'POST', headers: WRITE_HEADERS });
+  if (!response.ok) throw new Error(`API returned ${response.status}`);
+  return (await response.json()) as SetupResponse;
+};
+
+/** Per-field errors from a rejected save, keyed by field (`repoPaths.owner/name` for a folder). */
+export class SetupSaveError extends Error {
+  constructor(readonly errors: Record<string, string>) {
+    super('Settings were not saved');
+  }
+}
+
+export const saveSetup = async (patch: SetupPatch): Promise<SetupResponse> => {
+  const response = await fetch('/api/setup', {
+    method: 'PUT',
+    headers: { ...WRITE_HEADERS, 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (response.status === 400) {
+    const body = (await response.json().catch(() => ({}))) as { errors?: Record<string, string> };
+    throw new SetupSaveError(body.errors ?? { body: 'was rejected' });
+  }
+  if (!response.ok) throw new Error(`API returned ${response.status}`);
+  return (await response.json()) as SetupResponse;
+};
+
+export const openSessionDesktop = async (sessionId: string): Promise<void> => {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/open-desktop`, {
+    method: 'POST',
+    headers: WRITE_HEADERS,
+  });
+  if (!response.ok) throw new Error(`API returned ${response.status}`);
 };

@@ -24,7 +24,7 @@ data. You can run exactly this yourself before configuring anything.*
 | Track my own PRs | Configure `config.json`, then `npm run dev` |
 | Understand why a PR landed in a bucket | Read the receipts on its card — every verdict explains itself |
 | Stop a PR nagging me from "not asked" | Click **Posted to Discord** on the card |
-| See which Claude Code sessions are working on a PR | Add a `sessions` block to `config.json` — see [Claude Code sessions](#claude-code-sessions) |
+| See which Claude Code sessions are working on a PR | Nothing to set up — see [Claude Code sessions](#claude-code-sessions); the gear button opens the settings |
 | Ask Claude Code what needs me, and nudge or start sessions | Install the skill — see [Use it from Claude Code](#use-it-from-claude-code) |
 | Change how PRs are classified | Edit a rule in `src/rules/`, add a fixture test |
 | Check my changes didn't break classification | `npm test && npm run typecheck` |
@@ -175,21 +175,24 @@ behind a banner saying so, and keeps retrying every 30s rather than blanking out
 
 ## Claude Code sessions
 
-Optional. With a `sessions` block in `config.json`, each card lists the local Claude Code
-sessions working on that PR — own PRs and Others' PRs alike — with a status dot (amber:
-working, red: waiting for you, grey: idle, hollow: no live process), the session's name,
-and buttons:
+On by default whenever the `claude` CLI is found on your machine; nothing to configure
+for the common setups. Each card lists the local Claude Code sessions working on that PR
+— own PRs and Others' PRs alike — with a status dot (amber: working, red: waiting for
+you, grey: idle, hollow: no live process), the session's name, and buttons. Which
+buttons a session gets, and when:
 
-- **claude.ai** opens the session in Remote Control, when it has one.
-- **Copy** copies the command that brings the session back: `claude attach <id>` for a
-  background session, or a change into the session's directory followed by
-  `claude --resume <session id>` for an interactive one.
-- **Terminal** opens a terminal attached to the session, using your `openTerminalCommand`.
-  Background sessions only (they are the ones with an `id` to attach to).
+| Button | Appears when |
+| --- | --- |
+| **claude.ai** | The session has a Remote Control link. |
+| **Copy** | Always. Copies the command that brings the session back: `claude attach <id>` for a background session, or a change into the session's directory followed by `claude --resume <session id>` for an interactive one. |
+| **Terminal** | A terminal was detected (or set in `config.json`) and the session is a background session (it has an `id` to attach to). |
+| **Desktop app** | You are on macOS or Windows (x64). Runs `claude --desktop --resume <session id>`. Never offered on WSL or Linux. |
 
-A card with no linked session shows **Start session** when its repo has a local clone in
-`repoPaths`. It asks for confirmation (showing the session name and prompt), then runs
-`claude --bg --name "<repo> #<n> <title>" "<startPrompt>"` in that clone. One start per PR
+The settings panel picks which of these leads: that button comes first and is drawn as the
+main one; the others stay small. A card with no linked session shows **Start session** when
+its repo has a local clone (detected, picked in the panel, or in `repoPaths`). It asks for
+confirmation (showing the session name and prompt), then runs
+`claude --bg --name "<repo> #<n> <title>" "<start prompt>"` in that clone. One start per PR
 per minute is accepted.
 
 Three or fewer sessions show; more fold behind "+N more". Hover a row to see why it is
@@ -211,6 +214,44 @@ with any Claude Code update. Every read is defensive: a missing or changed file 
 the extra links it would have given, and a failing `claude` command shows "Claude Code
 sessions unavailable — <message>" under the headline.
 
+### What is detected, and the settings panel
+
+At startup (and when you press **Re-detect**) the server looks at the machine it runs on:
+
+- the **platform**: WSL (Linux with `WSL_DISTRO_NAME` set or a kernel version that names
+  Microsoft, plus the distro name), Linux, macOS or Windows;
+- the **Claude Code CLI**: the first `claude` on `PATH`, else `~/.local/bin/claude`, and its
+  `claude --version`;
+- **terminals** it can open a session in: Windows Terminal into WSL or on Windows, Terminal
+  and iTerm on macOS, `$TERMINAL` and `x-terminal-emulator` on Linux;
+- whether the **desktop app** can resume a session (macOS and Windows x64);
+- **local clones** of GitHub repos, so **Start session** works without setup: your
+  `repoPath`, the folder each live session runs in (its main working tree), and git repos
+  next to `repoPath`. At most 200 folders are looked at, with 2 seconds per git call; your
+  configured path comes first, then main clones, then extra worktrees.
+
+The gear button beside the headline opens the panel. It shows what was detected, and lets
+you choose the main button, the terminal (among the detected ones), a folder per repo on the
+board (a detected candidate or a path you type), and the start prompt. Choices are saved in
+the local database. Fields that `config.json` sets are shown read-only.
+
+**Precedence, for every field: `config.json` > the panel > detection.** The `sessions`
+block below stays as the advanced layer and always wins.
+
+**Safety rule.** The page can only pick among terminals the server detected and
+folders the server checked (an absolute path that exists and whose `origin` remote is that
+repo). It can never save a command or argv. A custom `openTerminalCommand` can only come
+from `config.json`, a file on your disk. The macOS presets pass the session's directory,
+the CLI path and the session id to AppleScript as separate arguments after the script, never
+inside the script text, so no value from a session can be interpreted as script.
+
+**Best effort.** Recorded PR links, first prompts and claude.ai links come from Claude
+Code's internal files and may stop working after an update. Matching by names, prompts and
+branches keeps working, because those come from the supported `claude agents` listing and
+git.
+
+### Advanced: the `sessions` block in config.json
+
 ```jsonc
 "sessions": {
   "enabled": true,
@@ -226,12 +267,12 @@ sessions unavailable — <message>" under the headline.
 
 | Field | Meaning |
 | --- | --- |
-| `enabled` | Optional; `false` turns the feature off while keeping the block. |
-| `claudeCommand` | The Claude Code CLI. Defaults to `claude`. Inside WSL (`wsl.exe -- cmd`) the login shell's `PATH` is not loaded, so use an absolute path such as `/home/me/.local/bin/claude`. |
+| `enabled` | Optional. Defaults to on when the CLI is detected; `false` turns the feature off. |
+| `claudeCommand` | The Claude Code CLI. Defaults to the detected path. Inside WSL (`wsl.exe -- cmd`) the login shell's `PATH` is not loaded, so use an absolute path such as `/home/me/.local/bin/claude`. |
 | `claudeDir` | Claude Code's data directory. Defaults to `$CLAUDE_CONFIG_DIR`, then `~/.claude`. |
-| `repoPaths` | Local clone per `owner/name`. A repo without an entry gets no **Start session** button. |
+| `repoPaths` | Local clone per `owner/name`; overrides the panel and detection for that repo. |
 | `startPrompt` | The first prompt of a started session. Placeholders: `{url}` `{title}` `{repo}` `{number}` `{author}`. |
-| `openTerminalCommand` | An argv **array**, never a shell string, run directly without a shell. Placeholders, each usable as a whole element or inside one: `{id}` `{sessionId}` `{cwd}` `{name}` `{claudeCommand}`. Unknown placeholders are rejected when the server starts. Without it there is no **Terminal** button. |
+| `openTerminalCommand` | An argv **array**, never a shell string, run directly without a shell. Placeholders, each usable as a whole element or inside one: `{id}` `{sessionId}` `{cwd}` `{name}` `{claudeCommand}`. Unknown placeholders are rejected when the server starts. Overrides the panel's terminal; without it the detected terminal is used. |
 
 The values substituted into `openTerminalCommand` always come from the live session
 listing, never from the request, so the browser can only ask to open a session that
@@ -247,18 +288,17 @@ Examples for `openTerminalCommand`:
 ["x-terminal-emulator", "-e", "{claudeCommand}", "attach", "{id}"]
 ```
 
-There is deliberately no macOS example: Terminal.app only accepts a command as an
-AppleScript string, and a working directory containing a quote would break out of it. On
-macOS use **Copy**, or point `openTerminalCommand` at a small script of your own that
-takes the session id as its argument.
+There is deliberately no hand-written macOS example: Terminal.app only accepts a command as
+an AppleScript string, and a directory containing a quote would break out of it. On macOS
+use the detected Terminal or iTerm presets, which pass values as arguments instead.
 
 **Who may ask the server to do things.** Any web page can make your browser send requests to
-`localhost`, so the three state-changing routes (Posted to Discord, Terminal, Start
-session) require an `x-pr-dashboard: 1` header and, when the request carries an `Origin`,
+`localhost`, so every state-changing route (Posted to Discord, Terminal, Desktop app, Start
+session, saving the settings, Re-detect) requires an `x-pr-dashboard: 1` header and, when the request carries an `Origin`,
 that it be `http://localhost:5173` or `http://127.0.0.1:5173` (the web port, set in
 `src/web-port.ts`). A custom header forces a CORS preflight, and the API sends no CORS
 headers, so a page on another site cannot get past it. Tools such as `curl` send the header
-and no `Origin`. Demo mode answers the two session routes with 404.
+and no `Origin`. Demo mode answers the session routes with 404.
 
 ## Use it from Claude Code
 
@@ -287,7 +327,7 @@ Then, in Claude Code, `/pr-attention`. The dashboard must be running (`npm run d
 | `pollIntervalMs` | How often to poll GitHub. Minimum 30000; 180000 (3 min) is the default. |
 | `staleAfterHours` | How long a PR sits unlooked-at before the Discord nudge goes stale. |
 | `quietAfterDays` | Optional. Days without activity after which another person's PR moves to "Gone quiet" on the Others' PRs tab. A positive number; defaults to 30. |
-| `sessions` | Optional. Links cards to local Claude Code sessions; off without it. See [Claude Code sessions](#claude-code-sessions). |
+| `sessions` | Optional, advanced. Overrides what is detected and what the settings panel saves; the example file omits it on purpose. See [Claude Code sessions](#claude-code-sessions). |
 
 The example file ships with placeholders in angle brackets for the two fields that
 must be yours. The server refuses to start while any placeholder is left in place, and
@@ -336,6 +376,7 @@ src/
   store/      SQLite: Discord stamps, cached verdicts, notification state
   notify/     macOS notifications via `osascript`
   sessions/   Claude Code sessions: list them, match them to PRs (match.ts is pure)
+  setup/      detect the local machine (CLI, terminals, clones) and resolve settings
   server/     Fastify routes, the poll loop, and demo mode
 client/src/   React board — App, Card, session rows, bucket labels and ordering
 skills/       the pr-attention Claude Code skill

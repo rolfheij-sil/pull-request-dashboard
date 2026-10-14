@@ -9,7 +9,7 @@ import { notifyKey } from '../rules/notify.js';
 import { prKey } from '../pr-key.js';
 import { notify } from '../notify/osascript.js';
 import type { Store } from '../store/db.js';
-import type { LinkedSession, SessionActions } from '../sessions/types.js';
+import type { LinkedSession, PrimaryAction, SessionActions } from '../sessions/types.js';
 import type { StartPreview } from '../sessions/start.js';
 import type {
   BranchInput, Bucket, Classification, Config, PrInput,
@@ -80,9 +80,13 @@ export interface Board {
   sessionsError: string | null;
   /** Which session buttons the client may offer. */
   sessionActions: SessionActions;
+  /** The session button each card puts first. */
+  primaryAction: PrimaryAction;
 }
 
-export const NO_SESSION_ACTIONS: SessionActions = { openTerminal: false, startSession: false };
+export const NO_SESSION_ACTIONS: SessionActions = {
+  openTerminal: false, openDesktop: false, startSession: false,
+};
 
 const ORDER: Bucket[] = [
   'blocked-mechanically', 'needs-your-response', 'ready-to-merge',
@@ -173,6 +177,7 @@ export function buildBoard(
     epoch: '',
     sessionsError: null,
     sessionActions: NO_SESSION_ACTIONS,
+    primaryAction: 'copy',
   };
   sortItems(board);
   countCourts(board);
@@ -255,6 +260,7 @@ export function createPoller(cfg: Config, store: Store): Poller {
             epoch,
             sessionsError: null,
             sessionActions: NO_SESSION_ACTIONS,
+            primaryAction: 'copy',
           }
         : { ...board, stale: true, error: message };
       commit(staleBoard);

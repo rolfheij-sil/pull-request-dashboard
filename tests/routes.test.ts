@@ -5,6 +5,8 @@ import { buildBoard, type Board, type Poller } from '../src/server/poller.js';
 import { registerRoutes, type Runner } from '../src/server/routes.js';
 import { serveDemo } from '../src/server/demo.js';
 import { createSessionService } from '../src/sessions/service.js';
+import { createSetupService } from '../src/setup/service.js';
+import type { DetectDeps } from '../src/setup/detect.js';
 import type { ListDeps } from '../src/sessions/list.js';
 import { openStore, type Store } from '../src/store/db.js';
 import { prKey } from '../src/pr-key.js';
@@ -57,6 +59,7 @@ const harness = async (
   sessionsConfig: SessionsConfig | undefined,
   prs: PrInput[] = [pr({})],
   reviewing: PrInput[] = [],
+  desktop = false,
 ): Promise<Harness> => {
   const store = openStore(':memory:', HOME);
   const board: Board = buildBoard(prs, [], store, cfg, new Date('2026-09-11T12:00:00Z'), reviewing);
@@ -72,10 +75,16 @@ const harness = async (
   const service = sessionsConfig === undefined
     ? undefined : createSessionService(sessionsConfig, listDeps(AGENTS));
   await service?.refresh();
+  const setup = createSetupService({
+    configSessions: sessionsConfig, repoPath: '/nonexistent', store,
+    liveSessions: () => service?.snapshot().sessions ?? [],
+    deps: { ...detectDeps, platform: desktop ? 'darwin' : 'linux' },
+  });
+  await setup.redetect();
   const app = Fastify();
   registerRoutes(app, poller, store, {
-    sessions: service === undefined || sessionsConfig === undefined
-      ? undefined : { service, config: sessionsConfig },
+    sessions: service,
+    setup: sessionsConfig === undefined ? undefined : setup,
     runner: runner as unknown as Runner,
     now: () => now,
   });
@@ -83,7 +92,16 @@ const harness = async (
   return { app, store, runner, refreshPoller, setNow: (ms) => { now = ms; } };
 };
 
+/** A machine with no `claude`, terminals or git repos, so only config.json supplies anything. */
+const detectDeps: DetectDeps = {
+  platform: 'linux', arch: 'x64', env: {}, homeDir: '/home/me',
+  readText: () => null, isExecutable: () => false, exists: () => false,
+  isDirectory: () => false, listDirs: () => [],
+  exec: async () => { throw new Error('nothing on this machine'); },
+};
+
 const open: SessionsConfig = {
+  enabled: true,
   openTerminalCommand: ['wt.exe', '--title', '{name}', '{claudeCommand}', 'attach', '{id}', '--cd={cwd}', '{sessionId}'],
   claudeCommand: '/bin/claude',
   repoPaths: { [HOME]: '/home/me/core' },
@@ -98,7 +116,7 @@ describe('GET /api/board', () => {
     const response = await h.app.inject({ method: 'GET', url: '/api/board' });
     const board = response.json<Board>();
     expect(board.items[0]?.sessions.map((s) => s.id)).toEqual(['abc12345']);
-    expect(board.sessionActions).toEqual({ openTerminal: true, startSession: true });
+    expect(board.sessionActions).toEqual({ openTerminal: true, openDesktop: false, startSession: true });
     expect(board.items[0]?.canStartSession).toBe(true);
   });
 
@@ -106,7 +124,7 @@ describe('GET /api/board', () => {
     h = await harness(undefined);
     const board = (await h.app.inject({ method: 'GET', url: '/api/board' })).json<Board>();
     expect(board.items[0]?.sessions).toEqual([]);
-    expect(board.sessionActions).toEqual({ openTerminal: false, startSession: false });
+    expect(board.sessionActions).toEqual({ openTerminal: false, openDesktop: false, startSession: false });
     expect(board.sessionsError).toBeNull();
   });
 });

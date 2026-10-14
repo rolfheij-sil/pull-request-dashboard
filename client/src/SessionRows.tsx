@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  openSessionTerminal, startSession, type BoardItem, type LinkedSession,
+  openSessionDesktop, openSessionTerminal, startSession,
+  type Board, type BoardItem, type LinkedSession,
 } from './api';
 import {
-  copyCommand, dotKind, MATCH_HINT, splitSessions, statusLabel,
+  copyCommand, dotKind, MATCH_HINT, orderActions, splitSessions, statusLabel,
+  type SessionActionId,
 } from './sessions';
 
 async function copyText(text: string): Promise<void> {
@@ -48,15 +50,69 @@ function useAction(action: () => Promise<void>, resetMs?: number) {
   return { phase, run };
 }
 
-function SessionRow({ session, canOpenTerminal }: {
+/** What the board lets a session row do, and which button leads. */
+export interface RowOptions {
+  actions: Board['sessionActions'];
+  primaryAction: Board['primaryAction'];
+}
+
+function SessionRow({ session, options }: {
   session: LinkedSession;
-  canOpenTerminal: boolean;
+  options: RowOptions;
 }) {
   const copy = useAction(() => copyText(copyCommand(session)), 2000);
   const terminal = useAction(async () => {
     if (session.id !== null) await openSessionTerminal(session.id);
   }, 3000);
+  const desktop = useAction(() => openSessionDesktop(session.sessionId), 3000);
   const label = statusLabel(session);
+
+  const available: SessionActionId[] = ['copy'];
+  if (session.claudeAiUrl !== null) available.push('claudeAi');
+  if (options.actions.openTerminal && session.id !== null) available.push('terminal');
+  if (options.actions.openDesktop) available.push('desktop');
+
+  const button = (id: SessionActionId, primary: boolean) => {
+    const className = primary ? 'session-button session-button-primary' : 'session-button';
+    switch (id) {
+      case 'claudeAi':
+        return (
+          <a key={id} className={className} href={session.claudeAiUrl ?? undefined} target="_blank" rel="noreferrer">
+            claude.ai
+          </a>
+        );
+      case 'terminal':
+        return (
+          <button
+            key={id} type="button" className={className}
+            disabled={terminal.phase === 'pending'}
+            onClick={() => void terminal.run()}
+          >
+            {terminal.phase === 'pending' ? 'Opening…'
+              : terminal.phase === 'failed' ? 'Failed'
+              : 'Terminal'}
+          </button>
+        );
+      case 'desktop':
+        return (
+          <button
+            key={id} type="button" className={className}
+            disabled={desktop.phase === 'pending'}
+            onClick={() => void desktop.run()}
+          >
+            {desktop.phase === 'pending' ? 'Opening…'
+              : desktop.phase === 'failed' ? 'Failed'
+              : 'Desktop app'}
+          </button>
+        );
+      default:
+        return (
+          <button key={id} type="button" className={className} onClick={() => void copy.run()}>
+            {copy.phase === 'done' ? 'Copied' : copy.phase === 'failed' ? 'Copy failed' : 'Copy'}
+          </button>
+        );
+    }
+  };
 
   return (
     <li className="session" title={MATCH_HINT[session.matchedBy]}>
@@ -69,26 +125,7 @@ function SessionRow({ session, canOpenTerminal }: {
       <span className="session-name">{session.name || session.sessionId}</span>
       <span className="session-status">{label}</span>
       <span className="session-actions">
-        {session.claudeAiUrl !== null && (
-          <a className="session-button" href={session.claudeAiUrl} target="_blank" rel="noreferrer">
-            claude.ai
-          </a>
-        )}
-        <button type="button" className="session-button" onClick={() => void copy.run()}>
-          {copy.phase === 'done' ? 'Copied' : copy.phase === 'failed' ? 'Copy failed' : 'Copy'}
-        </button>
-        {canOpenTerminal && session.id !== null && (
-          <button
-            type="button"
-            className="session-button"
-            disabled={terminal.phase === 'pending'}
-            onClick={() => void terminal.run()}
-          >
-            {terminal.phase === 'pending' ? 'Opening…'
-              : terminal.phase === 'failed' ? 'Failed'
-              : 'Terminal'}
-          </button>
-        )}
+        {orderActions(options.primaryAction, available).map(({ id, primary }) => button(id, primary))}
       </span>
     </li>
   );
@@ -128,9 +165,9 @@ function StartSession({ item, onStarted }: { item: BoardItem; onStarted: () => v
 }
 
 /** The Claude Code sessions linked to a card, or a way to start one when there are none. */
-export function SessionRows({ item, canOpenTerminal, onChange }: {
+export function SessionRows({ item, options, onChange }: {
   item: BoardItem;
-  canOpenTerminal: boolean;
+  options: RowOptions;
   onChange: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -143,7 +180,7 @@ export function SessionRows({ item, canOpenTerminal, onChange }: {
     <div className="sessions">
       <ul className="session-list" aria-label="Claude Code sessions">
         {shown.map((session) => (
-          <SessionRow key={session.sessionId} session={session} canOpenTerminal={canOpenTerminal} />
+          <SessionRow key={session.sessionId} session={session} options={options} />
         ))}
       </ul>
       {(hidden > 0 || expanded) && (

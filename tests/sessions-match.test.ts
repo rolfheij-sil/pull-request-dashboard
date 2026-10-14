@@ -36,7 +36,7 @@ const target = (over: Partial<Parameters<typeof matchOne>[1]> = {}) => ({
   headRefName: 'pt-1-feature' as string | null, ...over,
 });
 
-const ctx = { error: null, actions: { openTerminal: false, startSession: false } };
+const ctx = { error: null, actions: { openTerminal: false, openDesktop: false, startSession: false } };
 
 describe('matchOne', () => {
   it('matches a PR the session recorded, whatever its name says', () => {
@@ -196,10 +196,10 @@ describe('attachSessions', () => {
 
   it('reports the listing error and which buttons the client may offer', () => {
     const attached = attachSessions(board(), [], {
-      error: 'claude: not found', actions: { openTerminal: true, startSession: true },
+      error: 'claude: not found', actions: { openTerminal: true, openDesktop: false, startSession: true },
     });
     expect(attached.sessionsError).toBe('claude: not found');
-    expect(attached.sessionActions).toEqual({ openTerminal: true, startSession: true });
+    expect(attached.sessionActions).toEqual({ openTerminal: true, openDesktop: false, startSession: true });
   });
 
   it('marks only items whose repo has a local clone as startable, with a preview', () => {
