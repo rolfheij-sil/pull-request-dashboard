@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   checkRepoFolder, detectPlatform, detectSetup, findOnPath, findRepoClones, MAX_DIRS_SCANNED,
-  resolveClaudePath, terminalPresets, type DetectDeps,
+  claudeCandidates, terminalPresets, type DetectDeps,
 } from '../src/setup/detect.js';
 
 interface World {
@@ -20,6 +20,10 @@ interface World {
   /** Git answers per folder. */
   repos?: Record<string, { toplevel?: string; common?: string; remote?: string }>;
   claudeVersion?: string | Error;
+  /** Per-binary `--version` answers, overriding `claudeVersion`. */
+  versions?: Record<string, string | Error>;
+  /** Symlink targets. */
+  links?: Record<string, string>;
 }
 
 const world = (w: World = {}) => {
@@ -31,6 +35,7 @@ const world = (w: World = {}) => {
     homeDir: '/home/me',
     readText: (file) => w.files?.[file] ?? null,
     isExecutable: (file) => w.executables?.includes(file) ?? false,
+    realPath: (file) => w.links?.[file] ?? file,
     exists: (file) => (w.paths ?? []).includes(file) || (w.executables ?? []).includes(file),
     isDirectory: (file) => (w.directories ?? []).includes(file),
     listDirs: (dir) => w.children?.[dir] ?? [],
@@ -45,8 +50,9 @@ const world = (w: World = {}) => {
         if (answer === undefined) throw new Error('git: not answered');
         return `${answer}\n`;
       }
-      if (w.claudeVersion instanceof Error) throw w.claudeVersion;
-      return `${w.claudeVersion ?? '2.1.299 (Claude Code)'}\n`;
+      const answer = w.versions?.[file] ?? w.claudeVersion ?? '2.1.299 (Claude Code)';
+      if (answer instanceof Error) throw answer;
+      return `${answer}\n`;
     },
   };
   return { deps, calls };
@@ -82,50 +88,107 @@ describe('detectPlatform', () => {
 });
 
 describe('claude resolution', () => {
-  it('takes the first executable on PATH, in PATH order', () => {
+  const NODE = '/volta/node/bin/claude';
+  const detect = (w: World) =>
+    detectSetup(world(w).deps, { repoPath: '/g/core', sessionCwds: [] });
+
+  it('lists every copy on PATH in order, then the usual install locations', () => {
     const { deps } = world({
       env: { PATH: '/nope:/opt/a:/opt/b' },
-      executables: ['/opt/b/claude', '/opt/a/claude', CLAUDE],
+      executables: ['/opt/b/claude', '/opt/a/claude', CLAUDE, '/home/me/.claude/local/claude'],
     });
-    expect(resolveClaudePath(deps)).toBe('/opt/a/claude');
+    expect(claudeCandidates(deps)).toEqual([
+      '/opt/a/claude', '/opt/b/claude', CLAUDE, '/home/me/.claude/local/claude',
+    ]);
   });
 
-  it('falls back to ~/.local/bin/claude when PATH has none', () => {
-    const { deps } = world({ env: { PATH: '/opt/a' }, executables: [CLAUDE] });
-    expect(resolveClaudePath(deps)).toBe(CLAUDE);
-  });
-
-  it('finds nothing when it is nowhere, ignoring a non-executable file', () => {
+  it('ignores a non-executable file and finds nothing when it is nowhere', () => {
     const { deps } = world({ env: { PATH: '/opt/a' }, paths: ['/opt/a/claude', CLAUDE] });
-    expect(resolveClaudePath(deps)).toBeNull();
+    expect(claudeCandidates(deps)).toEqual([]);
   });
 
   it('splits PATH with semicolons on Windows', () => {
     const { deps } = world({ platform: 'win32', env: { PATH: 'C:\\a;C:\\b' }, executables: ['C:\\b\\claude.exe'] });
-    expect(resolveClaudePath(deps)).toBe('C:\\b\\claude.exe');
+    expect(claudeCandidates(deps)).toEqual(['C:\\b\\claude.exe']);
     expect(findOnPath('wt.exe', deps)).toBeNull();
   });
 
-  it('reports the version from claude --version, with a 5 s timeout', async () => {
-    const { deps, calls } = world({ executables: [CLAUDE], claudeVersion: '2.1.299 (Claude Code)' });
-    const detected = await detectSetup(deps, { repoPath: '/g/core', sessionCwds: [] });
-    expect(detected.claude).toEqual({ path: CLAUDE, version: '2.1.299 (Claude Code)', reason: null });
-    expect(calls.find((c) => c.file === CLAUDE)).toMatchObject({ args: ['--version'], timeout: 5000 });
+  it('dedupes copies that are the same file through a symlink', () => {
+    const { deps } = world({
+      env: { PATH: '/bin' }, executables: ['/bin/claude', CLAUDE], links: { '/bin/claude': CLAUDE },
+    });
+    expect(claudeCandidates(deps)).toEqual(['/bin/claude']);
+  });
+
+  it('picks the highest version whatever the PATH order', async () => {
+    const detected = await detect({
+      env: { PATH: '/volta/node/bin' },
+      executables: [NODE, CLAUDE],
+      versions: { [NODE]: '2.1.259 (Claude Code)', [CLAUDE]: '2.1.299 (Claude Code)' },
+    });
+    expect(detected.claude.path).toBe(CLAUDE);
+    expect(detected.claude.version).toBe('2.1.299 (Claude Code)');
+    expect(detected.claude.reason).toBeNull();
+    expect(detected.claude.candidates).toEqual([
+      { path: NODE, version: '2.1.259 (Claude Code)' },
+      { path: CLAUDE, version: '2.1.299 (Claude Code)' },
+    ]);
+  });
+
+  it('compares versions numerically, not as text', async () => {
+    const detected = await detect({
+      env: { PATH: '/a:/b' }, executables: ['/a/claude', '/b/claude'],
+      versions: { '/a/claude': '2.1.99', '/b/claude': '2.1.100' },
+    });
+    expect(detected.claude.path).toBe('/b/claude');
+  });
+
+  it('keeps the earlier copy on a tie', async () => {
+    const detected = await detect({
+      env: { PATH: '/a:/b' }, executables: ['/a/claude', '/b/claude'],
+      versions: { '/a/claude': '2.1.299', '/b/claude': '2.1.299 (Claude Code)' },
+    });
+    expect(detected.claude.path).toBe('/a/claude');
+  });
+
+  it('skips copies whose --version fails or is unreadable', async () => {
+    const detected = await detect({
+      env: { PATH: '/a:/b:/c' }, executables: ['/a/claude', '/b/claude', '/c/claude'],
+      versions: { '/a/claude': new Error('boom'), '/b/claude': 'garbage', '/c/claude': '2.0.1' },
+    });
+    expect(detected.claude.path).toBe('/c/claude');
+    expect(detected.claude.candidates).toEqual([{ path: '/c/claude', version: '2.0.1' }]);
+  });
+
+  it('runs --version on each copy with a 5 s timeout', async () => {
+    const w = world({ env: { PATH: '/a:/b' }, executables: ['/a/claude', '/b/claude'] });
+    await detectSetup(w.deps, { repoPath: '/g/core', sessionCwds: [] });
+    const probes = w.calls.filter((c) => c.file.endsWith('/claude'));
+    expect(probes.map((c) => c.file).sort()).toEqual(['/a/claude', '/b/claude']);
+    expect(probes.every((c) => c.timeout === 5000 && c.args[0] === '--version')).toBe(true);
   });
 
   it('says why when claude is missing', async () => {
-    const detected = await detectSetup(world().deps, { repoPath: '/g/core', sessionCwds: [] });
-    expect(detected.claude.path).toBeNull();
+    const detected = await detect({});
+    expect(detected.claude).toMatchObject({ path: null, version: null, candidates: [] });
     expect(detected.claude.reason).toMatch(/not found/);
     expect(detected.terminals).toEqual([]);
   });
 
-  it('keeps the path but reports the reason when --version fails', async () => {
-    const { deps } = world({ executables: [CLAUDE], claudeVersion: new Error('boom') });
-    const detected = await detectSetup(deps, { repoPath: '/g/core', sessionCwds: [] });
-    expect(detected.claude.path).toBe(CLAUDE);
-    expect(detected.claude.version).toBeNull();
-    expect(detected.claude.reason).toMatch(/boom/);
+  it('says why when every copy fails --version', async () => {
+    const detected = await detect({ executables: [CLAUDE], claudeVersion: new Error('boom') });
+    expect(detected.claude.path).toBeNull();
+    expect(detected.claude.reason).toMatch(/--version/);
+  });
+
+  it('builds terminal presets around the chosen copy', async () => {
+    const detected = await detect({
+      env: { PATH: '/volta/node/bin:/mnt/wt', WSL_DISTRO_NAME: 'Ubuntu' },
+      executables: [NODE, CLAUDE, '/mnt/wt/wt.exe'],
+      versions: { [NODE]: '2.1.259', [CLAUDE]: '2.1.299' },
+    });
+    expect(detected.terminals[0]?.argv).toContain(CLAUDE);
+    expect(detected.terminals[0]?.argv).not.toContain(NODE);
   });
 });
 

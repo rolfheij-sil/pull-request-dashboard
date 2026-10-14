@@ -104,6 +104,17 @@ export function SettingsPanel({ open, repos, onClose, onSaved }: {
                     ? `Not found — ${setup.detected.claude.reason ?? 'unknown reason'}`
                     : `${setup.detected.claude.path}${setup.detected.claude.version === null ? '' : ` (${setup.detected.claude.version})`}`}
                 </dd>
+                {setup.detected.claude.candidates.length > 1 && (
+                  <>
+                    <dt />
+                    <dd className="hint">
+                      Also found, not used:{' '}
+                      {setup.detected.claude.candidates
+                        .filter((c) => c.path !== setup.detected.claude.path)
+                        .map((c) => `${c.path} (${c.version})`).join('; ')}
+                    </dd>
+                  </>
+                )}
                 <dt>Terminals</dt>
                 <dd>
                   {setup.detected.terminals.length === 0

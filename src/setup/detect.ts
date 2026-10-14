@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
-import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  accessSync, constants, existsSync, readFileSync, readdirSync, realpathSync, statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { repoFromRemote } from '../sessions/list.js';
@@ -25,11 +27,13 @@ export interface DetectedSetup {
   /** The WSL distribution name, when running under WSL. */
   wslDistro: string | null;
   claude: {
-    /** Absolute path of the CLI; null when it was not found. */
+    /** The newest working CLI; null when none was found. */
     path: string | null;
     version: string | null;
-    /** Why `path` or `version` is missing. */
+    /** Why no CLI was chosen. */
     reason: string | null;
+    /** Every distinct CLI that answered `--version`, in search order. */
+    candidates: { path: string; version: string }[];
   };
   terminals: TerminalPreset[];
   /** `claude --desktop --resume` can open the Claude desktop app on this machine. */
@@ -46,6 +50,8 @@ export interface DetectDeps {
   homeDir: string;
   readText(file: string): string | null;
   isExecutable(file: string): boolean;
+  /** Resolves symlinks; defaults to the path itself. */
+  realPath?(file: string): string;
   exists(file: string): boolean;
   isDirectory(file: string): boolean;
   /** Absolute paths of the immediate subdirectories of `dir`; empty when unreadable. */
@@ -72,6 +78,13 @@ export const defaultDetectDeps: DetectDeps = {
       return statSync(file).isFile();
     } catch {
       return false;
+    }
+  },
+  realPath: (file) => {
+    try {
+      return realpathSync(file);
+    } catch {
+      return file;
     }
   },
   exists: (file) => existsSync(file),
@@ -107,29 +120,51 @@ export function detectPlatform(
   return wsl ? 'wsl' : 'linux';
 }
 
-/** The first executable called `name` on `PATH`, or null. */
-export function findOnPath(name: string, deps: DetectDeps): string | null {
+/** Every executable called `name` on `PATH`, in PATH order. */
+export function findAllOnPath(name: string, deps: DetectDeps): string[] {
   const windows = deps.platform === 'win32';
   const flavor = windows ? path.win32 : path.posix;
   const dirs = (deps.env.PATH ?? deps.env.Path ?? '')
     .split(windows ? ';' : ':').filter((dir) => dir !== '');
-  for (const dir of dirs) {
-    const candidate = flavor.join(dir, name);
-    if (deps.isExecutable(candidate)) return candidate;
-  }
-  return null;
+  return dirs.map((dir) => flavor.join(dir, name)).filter((file) => deps.isExecutable(file));
 }
 
-/** Walks `PATH` for the CLI, then falls back to `~/.local/bin/claude`. */
-export function resolveClaudePath(deps: DetectDeps): string | null {
-  const names = deps.platform === 'win32' ? ['claude.exe', 'claude.cmd', 'claude'] : ['claude'];
-  for (const name of names) {
-    const found = findOnPath(name, deps);
-    if (found !== null) return found;
-  }
-  const fallback = path.posix.join(deps.homeDir, '.local', 'bin', 'claude');
-  return deps.isExecutable(fallback) ? fallback : null;
+/** The first executable called `name` on `PATH`, or null. */
+export function findOnPath(name: string, deps: DetectDeps): string | null {
+  return findAllOnPath(name, deps)[0] ?? null;
 }
+
+/**
+ * Every distinct `claude` binary: those on `PATH` (in order), then the usual
+ * install locations. `npm run` and version managers put old copies early on
+ * `PATH`, so the first hit is not necessarily the one the user runs.
+ */
+export function claudeCandidates(deps: DetectDeps): string[] {
+  const names = deps.platform === 'win32' ? ['claude.exe', 'claude.cmd', 'claude'] : ['claude'];
+  const found = names.flatMap((name) => findAllOnPath(name, deps));
+  for (const known of [
+    path.posix.join(deps.homeDir, '.local', 'bin', 'claude'),
+    path.posix.join(deps.homeDir, '.claude', 'local', 'claude'),
+  ]) {
+    if (deps.isExecutable(known)) found.push(known);
+  }
+  const seen = new Set<string>();
+  return found.filter((file) => {
+    const real = deps.realPath?.(file) ?? file;
+    if (seen.has(real)) return false;
+    seen.add(real);
+    return true;
+  });
+}
+
+/** `[major, minor, patch]` from output such as `2.1.299 (Claude Code)`; null when absent. */
+export function parseVersion(text: string): [number, number, number] | null {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(text);
+  return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+const compareVersions = (a: number[], b: number[]): number =>
+  a[0]! - b[0]! || a[1]! - b[1]! || a[2]! - b[2]!;
 
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -352,22 +387,36 @@ export async function detectSetup(
   );
   const wslDistro = platform === 'wsl' ? (deps.env.WSL_DISTRO_NAME ?? null) : null;
 
-  const claudePath = resolveClaudePath(deps);
-  let version: string | null = null;
-  let reason: string | null = claudePath === null ? 'claude was not found on PATH or in ~/.local/bin' : null;
-  if (claudePath !== null) {
+  const probed = await Promise.all(claudeCandidates(deps).map(async (file) => {
     try {
-      version = (await deps.exec(claudePath, ['--version'], { timeout: VERSION_TIMEOUT_MS }))
-        .trim().split('\n')[0] ?? null;
-    } catch (error) {
-      reason = `claude --version failed: ${errorMessage(error)}`;
+      const line = (await deps.exec(file, ['--version'], { timeout: VERSION_TIMEOUT_MS }))
+        .trim().split('\n')[0] ?? '';
+      const parsed = parseVersion(line);
+      return parsed === null ? null : { path: file, version: line, parsed };
+    } catch {
+      return null;
     }
+  }));
+  const working = probed.filter((c): c is NonNullable<typeof c> => c !== null);
+  // The highest version wins; on a tie the earlier candidate does.
+  let best: (typeof working)[number] | undefined;
+  for (const candidate of working) {
+    if (best === undefined || compareVersions(candidate.parsed, best.parsed) > 0) best = candidate;
   }
+  const claudePath = best?.path ?? null;
+  const reason = best !== undefined ? null
+    : probed.length === 0 ? 'claude was not found on PATH or in ~/.local/bin'
+    : 'claude was found but `claude --version` failed for every copy';
 
   return {
     platform,
     wslDistro,
-    claude: { path: claudePath, version, reason },
+    claude: {
+      path: claudePath,
+      version: best?.version ?? null,
+      reason,
+      candidates: working.map(({ path: file, version }) => ({ path: file, version })),
+    },
     terminals: terminalPresets(platform, claudePath, wslDistro, deps),
     desktopResume: platform === 'darwin' || (platform === 'win32' && deps.arch === 'x64'),
     repoClones: await findRepoClones(deps, search),

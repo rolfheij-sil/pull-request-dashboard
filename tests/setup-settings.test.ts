@@ -8,7 +8,7 @@ import { openStore } from '../src/store/db.js';
 const detected = (over: Partial<DetectedSetup> = {}): DetectedSetup => ({
   platform: 'linux',
   wslDistro: null,
-  claude: { path: '/usr/bin/claude', version: '2.1', reason: null },
+  claude: { path: '/usr/bin/claude', version: '2.1', reason: null, candidates: [] },
   terminals: [
     { id: 'first', label: 'First', argv: ['first', '{id}'] },
     { id: 'second', label: 'Second', argv: ['second', '{id}'] },
@@ -115,13 +115,13 @@ describe('effectiveSessionsConfig: primary action', () => {
 describe('effectiveSessionsConfig: enabled and CLI', () => {
   it('is on when the CLI is detected and off when it is not', () => {
     expect(effectiveSessionsConfig(undefined, detected(), {}).sessions.enabled).toBe(true);
-    const missing = detected({ claude: { path: null, version: null, reason: 'x' } });
+    const missing = detected({ claude: { path: null, version: null, reason: 'x', candidates: [] } });
     expect(effectiveSessionsConfig(undefined, missing, {}).sessions.enabled).toBe(false);
   });
 
   it('lets config.json turn it off or on', () => {
     expect(effectiveSessionsConfig({ enabled: false }, detected(), {}).sessions.enabled).toBe(false);
-    const missing = detected({ claude: { path: null, version: null, reason: 'x' } });
+    const missing = detected({ claude: { path: null, version: null, reason: 'x', candidates: [] } });
     expect(effectiveSessionsConfig({ enabled: true }, missing, {}).sessions.enabled).toBe(true);
   });
 

@@ -113,7 +113,12 @@ export interface TerminalPreset { id: string; label: string }
 export interface DetectedSetup {
   platform: 'wsl' | 'linux' | 'darwin' | 'win32';
   wslDistro: string | null;
-  claude: { path: string | null; version: string | null; reason: string | null };
+  claude: {
+    path: string | null;
+    version: string | null;
+    reason: string | null;
+    candidates: { path: string; version: string }[];
+  };
   terminals: TerminalPreset[];
   desktopResume: boolean;
   /** Lowercased `owner/name` to candidate clone folders, best first. */

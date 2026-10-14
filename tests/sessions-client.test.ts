@@ -116,7 +116,7 @@ describe('settings panel helpers', () => {
   const setup = (over: Partial<SetupResponse> = {}): SetupResponse => ({
     detected: {
       platform: 'linux', wslDistro: null, desktopResume: false, repoClones: {},
-      claude: { path: '/c', version: '1', reason: null },
+      claude: { path: '/c', version: '1', reason: null, candidates: [] },
       terminals: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
     },
     saved: {},

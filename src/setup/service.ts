@@ -44,7 +44,7 @@ export interface SetupOptions {
 const emptyDetection = (deps: DetectDeps): DetectedSetup => ({
   platform: deps.platform === 'darwin' || deps.platform === 'win32' ? deps.platform : 'linux',
   wslDistro: null,
-  claude: { path: null, version: null, reason: 'not detected yet' },
+  claude: { path: null, version: null, reason: 'not detected yet', candidates: [] },
   terminals: [],
   desktopResume: false,
   repoClones: {},
