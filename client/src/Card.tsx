@@ -1,5 +1,6 @@
 import type { BoardItem } from './api';
 import { markPostedToDiscord } from './api';
+import { SessionRows } from './SessionRows';
 
 const DOT: Record<BoardItem['checkDot'], string> = {
   fail: '#d64545', pending: '#c98a20', pass: '#3f9142', none: 'transparent',
@@ -18,8 +19,10 @@ const ago = (iso: string | null, now: number): string => {
   return `${Math.round(hours / 24)}d`;
 };
 
-export function Card({ item, now, onChange }: {
+export function Card({ item, now, canOpenTerminal, onChange }: {
   item: BoardItem;
+  /** The server can open a terminal attached to a session. */
+  canOpenTerminal: boolean;
   /** The board's `fetchedAt`, as epoch ms — the reference point for ages. */
   now: number;
   onChange: () => void;
@@ -50,6 +53,8 @@ export function Card({ item, now, onChange }: {
           {item.verdict.asks.map((ask) => <li key={ask}>{ask}</li>)}
         </ul>
       )}
+
+      <SessionRows item={item} canOpenTerminal={canOpenTerminal} onChange={onChange} />
 
       {item.role === 'author' && (item.bucket === 'not-asked' || item.bucket === 'draft') && (
         <button type="button" onClick={post}>Posted to Discord</button>

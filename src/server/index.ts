@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import { loadConfig } from '../config.js';
 import { notificationsSupported } from '../notify/osascript.js';
 import { openStore } from '../store/db.js';
+import { createSessionService } from '../sessions/service.js';
 import { createPoller } from './poller.js';
 import { registerRoutes } from './routes.js';
 
@@ -20,10 +21,18 @@ if (!notificationsSupported()) {
   );
 }
 
+const sessionsConfig = config.sessions?.enabled === false ? undefined : config.sessions;
+const sessionService = sessionsConfig === undefined ? undefined : createSessionService(sessionsConfig);
+
 const app = Fastify({ logger: { level: 'warn' } });
-registerRoutes(app, poller, store);
+registerRoutes(app, poller, store, {
+  sessions: sessionService === undefined || sessionsConfig === undefined
+    ? undefined
+    : { service: sessionService, config: sessionsConfig },
+});
 
 poller.start();
+sessionService?.start();
 
 const port = Number(process.env.PORT ?? 5174);
 await app.listen({ port, host: '127.0.0.1' });

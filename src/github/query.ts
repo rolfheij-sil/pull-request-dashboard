@@ -29,6 +29,7 @@ const PR_FIELDS = `
     }
   }
   headRefOid
+  headRefName
   statusCheckRollup: commits(last: 1) {
     nodes {
       commit {

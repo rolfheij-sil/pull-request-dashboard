@@ -11,5 +11,17 @@
   ],
   "pollIntervalMs": 180000,
   "staleAfterHours": 48,
-  "quietAfterDays": 30
+  "quietAfterDays": 30,
+  "sessions": {
+    "enabled": false,
+    "claudeCommand": "claude",
+    "repoPaths": {
+      "paranext/paranext-core": "/home/me/git/paranext-core"
+    },
+    "startPrompt": "Look at {url} ({title}). Tell me what it needs from me next.",
+    "openTerminalCommand": [
+      "wt.exe", "-w", "0", "new-tab", "--title", "{name}",
+      "wsl.exe", "-d", "Ubuntu", "--cd", "{cwd}", "--", "{claudeCommand}", "attach", "{id}"
+    ]
+  }
 }

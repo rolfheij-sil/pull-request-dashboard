@@ -7,10 +7,11 @@
  */
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import Fastify from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import { buildBoard, type Board } from './poller.js';
 import { openStore, type Store } from '../store/db.js';
 import { prKey, repoFromUrl } from '../pr-key.js';
+import { requireDashboardRequest } from './csrf.js';
 import { isGithubName, parsePrNumber } from './params.js';
 import type { BranchInput, Config, PrInput } from '../types.js';
 
@@ -59,6 +60,7 @@ const loadFixture = (n: number): PrInput => {
     repo: fixture.repo ?? repoFromUrl(fixture.url),
     author: fixture.author ?? DEMO_CONFIG.me,
     updatedAt: fixture.updatedAt ?? DEMO_NOW.toISOString(),
+    headRefName: fixture.headRefName ?? null,
   } as PrInput;
 };
 
@@ -77,7 +79,7 @@ export function buildDemoBoard(store?: Store): Board {
   }
 }
 
-export async function serveDemo(port: number): Promise<void> {
+export async function serveDemo(port: number): Promise<FastifyInstance> {
   // Held open for the life of the process so that clicking "Posted to
   // Discord" actually moves the card, as it does on the real board.
   const store = openStore(':memory:', DEMO_HOME_REPO);
@@ -86,8 +88,15 @@ export async function serveDemo(port: number): Promise<void> {
   const app = Fastify({ logger: false });
   app.get('/api/board', async (_request, reply) => reply.send(board));
 
+  // Demo mode never touches Claude Code or the machine's processes.
+  const sessionsDisabled = async (_request: unknown, reply: FastifyReply) =>
+    reply.code(404).send({ error: 'sessions are disabled in demo mode' });
+  app.post('/api/sessions/:id/open-terminal', sessionsDisabled);
+  app.post('/api/pr/:owner/:name/:number/start-session', sessionsDisabled);
+
   app.post<{ Params: { owner: string; name: string; number: string }; Body: { posted: boolean } }>(
     '/api/pr/:owner/:name/:number/discord',
+    { preHandler: requireDashboardRequest() },
     async (request, reply) => {
       const number = parsePrNumber(request.params.number);
       if (number === null) {
@@ -108,6 +117,7 @@ export async function serveDemo(port: number): Promise<void> {
   );
 
   await app.listen({ port, host: '127.0.0.1' });
+  return app;
 }
 
 const invokedDirectly = process.argv[1] !== undefined

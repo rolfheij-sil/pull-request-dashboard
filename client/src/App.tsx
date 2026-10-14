@@ -60,11 +60,12 @@ function NotificationControl() {
   );
 }
 
-function BucketSections({ order, labels, items, asOf, onChange }: {
+function BucketSections({ order, labels, items, asOf, canOpenTerminal, onChange }: {
   order: readonly string[];
   labels: Record<string, string>;
   items: BoardItem[];
   asOf: number;
+  canOpenTerminal: boolean;
   onChange: () => void;
 }) {
   return (
@@ -79,6 +80,7 @@ function BucketSections({ order, labels, items, asOf, onChange }: {
                 key={`${item.repo}#${item.number}`}
                 item={item}
                 now={asOf}
+                canOpenTerminal={canOpenTerminal}
                 onChange={onChange}
               />
             ))}
@@ -162,6 +164,9 @@ export function App() {
       <h1>{board.yourCourtCount} in your court</h1>
       <p className="summary">{summaryLine(board)}</p>
       <NotificationControl />
+      {board.sessionsError !== null && (
+        <p className="sessions-error">Claude Code sessions unavailable — {board.sessionsError}</p>
+      )}
 
       {failed && (
         <p className="banner">
@@ -208,6 +213,7 @@ export function App() {
           labels={BUCKET_LABEL}
           items={board.items}
           asOf={asOf}
+          canOpenTerminal={board.sessionActions.openTerminal}
           onChange={() => void load()}
         />
 
@@ -216,8 +222,8 @@ export function App() {
             <summary>Local branches ({board.branches.length})</summary>
             {/*
               A plain list of local branches, not a claim about unsubmitted work:
-              we do not fetch headRefName, so we cannot tell which branches have
-              PRs. The only distinction we can honestly draw is a gone upstream.
+              the list is not correlated with PRs, so the only distinction it
+              draws is a gone upstream.
             */}
             <ul>
               {board.branches.map((b) => (
@@ -242,6 +248,7 @@ export function App() {
             labels={REVIEW_BUCKET_LABEL}
             items={board.reviewing}
             asOf={asOf}
+            canOpenTerminal={board.sessionActions.openTerminal}
             onChange={() => void load()}
           />
         )}

@@ -24,6 +24,8 @@ data. You can run exactly this yourself before configuring anything.*
 | Track my own PRs | Configure `config.json`, then `npm run dev` |
 | Understand why a PR landed in a bucket | Read the receipts on its card — every verdict explains itself |
 | Stop a PR nagging me from "not asked" | Click **Posted to Discord** on the card |
+| See which Claude Code sessions are working on a PR | Add a `sessions` block to `config.json` — see [Claude Code sessions](#claude-code-sessions) |
+| Ask Claude Code what needs me, and nudge or start sessions | Install the skill — see [Use it from Claude Code](#use-it-from-claude-code) |
 | Change how PRs are classified | Edit a rule in `src/rules/`, add a fixture test |
 | Check my changes didn't break classification | `npm test && npm run typecheck` |
 | Refresh the captured PRs the tests run against | `npx tsx scripts/capture-fixtures.ts 2717 2720 …` |
@@ -89,9 +91,9 @@ click open.
 
 Below the buckets is a plain list of your **local branches**, with `— upstream gone`
 marked on any whose remote has been deleted. It is deliberately not a claim about
-unsubmitted work: the GraphQL query doesn't fetch `headRefName`, so there's no honest
-way to match a branch to its PR. A gone upstream is the only distinction the data
-supports.
+unsubmitted work: the list is not matched to PRs, so a gone upstream is the only
+distinction it draws. (Each card carries its PR's `headRefName`, but only
+[Claude Code sessions](#claude-code-sessions) use it.)
 
 ## Others' PRs
 
@@ -171,9 +173,109 @@ enable browser notifications.
 **Staleness.** If the API can't be reached the board keeps showing the last good data
 behind a banner saying so, and keeps retrying every 30s rather than blanking out.
 
+## Claude Code sessions
+
+Optional. With a `sessions` block in `config.json`, each card lists the local Claude Code
+sessions working on that PR — own PRs and Others' PRs alike — with a status dot (amber:
+working, red: waiting for you, grey: idle, hollow: no live process), the session's name,
+and buttons:
+
+- **claude.ai** opens the session in Remote Control, when it has one.
+- **Copy** copies the command that brings the session back: `claude attach <id>` for a
+  background session, or a change into the session's directory followed by
+  `claude --resume <session id>` for an interactive one.
+- **Terminal** opens a terminal attached to the session, using your `openTerminalCommand`.
+  Background sessions only (they are the ones with an `id` to attach to).
+
+A card with no linked session shows **Start session** when its repo has a local clone in
+`repoPaths`. It asks for confirmation (showing the session name and prompt), then runs
+`claude --bg --name "<repo> #<n> <title>" "<startPrompt>"` in that clone. One start per PR
+per minute is accepted.
+
+Three or fewer sessions show; more fold behind "+N more". Hover a row to see why it is
+linked. A session is linked to a PR when the first of these holds (strongest first):
+
+| Link | Evidence |
+| --- | --- |
+| recorded | The session recorded the PR itself (the pull requests Claude Code lists on a background session). |
+| url | The session's name or first prompt contains the PR's URL. |
+| branch | The session's checked-out branch is the PR's head branch, in the same repo. `main` and `master` never count. |
+| number | The name or first prompt contains `#<number>` as a whole token (`#2880` does not match `#28800`), and either the session is in the PR's repo or no other PR on the board has that number. |
+
+Sessions are listed with `claude agents --json --all`, every 20 seconds and independently
+of the GitHub poll, so statuses update without extra GitHub calls. The branch, repo and
+(for background sessions) recorded PRs, first prompt and claude.ai link come from
+git and from Claude Code's own files under `claudeDir` (`jobs/<id>/state.json`,
+`sessions/<pid>.json`). **Those files are an internal, undocumented format** that can change
+with any Claude Code update. Every read is defensive: a missing or changed file only costs
+the extra links it would have given, and a failing `claude` command shows "Claude Code
+sessions unavailable — <message>" under the headline.
+
+```jsonc
+"sessions": {
+  "enabled": true,
+  "claudeCommand": "/home/me/.local/bin/claude",
+  "repoPaths": { "paranext/paranext-core": "/home/me/git/paranext-core" },
+  "startPrompt": "Look at {url} ({title}). Tell me what it needs from me next.",
+  "openTerminalCommand": [
+    "wt.exe", "-w", "0", "new-tab", "--title", "{name}",
+    "wsl.exe", "-d", "Ubuntu", "--cd", "{cwd}", "--", "{claudeCommand}", "attach", "{id}"
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `enabled` | Optional; `false` turns the feature off while keeping the block. |
+| `claudeCommand` | The Claude Code CLI. Defaults to `claude`. Inside WSL (`wsl.exe -- cmd`) the login shell's `PATH` is not loaded, so use an absolute path such as `/home/me/.local/bin/claude`. |
+| `claudeDir` | Claude Code's data directory. Defaults to `$CLAUDE_CONFIG_DIR`, then `~/.claude`. |
+| `repoPaths` | Local clone per `owner/name`. A repo without an entry gets no **Start session** button. |
+| `startPrompt` | The first prompt of a started session. Placeholders: `{url}` `{title}` `{repo}` `{number}` `{author}`. |
+| `openTerminalCommand` | An argv **array**, never a shell string, run directly without a shell. Placeholders, each usable as a whole element or inside one: `{id}` `{sessionId}` `{cwd}` `{name}` `{claudeCommand}`. Unknown placeholders are rejected when the server starts. Without it there is no **Terminal** button. |
+
+The values substituted into `openTerminalCommand` always come from the live session
+listing, never from the request, so the browser can only ask to open a session that
+`claude agents` currently reports.
+
+Examples for `openTerminalCommand`:
+
+```jsonc
+// Windows Terminal tab into WSL (as above)
+["wt.exe", "-w", "0", "new-tab", "--title", "{name}", "wsl.exe", "-d", "Ubuntu", "--cd", "{cwd}", "--", "{claudeCommand}", "attach", "{id}"]
+
+// Linux
+["x-terminal-emulator", "-e", "{claudeCommand}", "attach", "{id}"]
+```
+
+There is deliberately no macOS example: Terminal.app only accepts a command as an
+AppleScript string, and a working directory containing a quote would break out of it. On
+macOS use **Copy**, or point `openTerminalCommand` at a small script of your own that
+takes the session id as its argument.
+
+**Who may ask the server to do things.** Any web page can make your browser send requests to
+`localhost`, so the three state-changing routes (Posted to Discord, Terminal, Start
+session) require an `x-pr-dashboard: 1` header and, when the request carries an `Origin`,
+that it be `http://localhost:5173` or `http://127.0.0.1:5173` (the web port, set in
+`src/web-port.ts`). A custom header forces a CORS preflight, and the API sends no CORS
+headers, so a page on another site cannot get past it. Tools such as `curl` send the header
+and no `Origin`. Demo mode answers the two session routes with 404.
+
+## Use it from Claude Code
+
+`skills/pr-attention/` is a Claude Code skill that reads the same board over the local API:
+it lists what needs you, drafts nudges for the sessions already working on those PRs, and
+can start a session for a PR that has none. It never sends or starts anything without your
+approval. Install it by symlinking it into your skills directory, then run it:
+
+```bash
+ln -s "$PWD/skills/pr-attention" ~/.claude/skills/pr-attention
+```
+
+Then, in Claude Code, `/pr-attention`. The dashboard must be running (`npm run dev`).
+
 ## Configuration
 
-`config.json` is gitignored, so your copy stays yours. Every field is required except `scope` and `quietAfterDays`.
+`config.json` is gitignored, so your copy stays yours. Every field is required except `scope`, `quietAfterDays` and `sessions`.
 
 | Field | Meaning |
 | --- | --- |
@@ -185,6 +287,7 @@ behind a banner saying so, and keeps retrying every 30s rather than blanking out
 | `pollIntervalMs` | How often to poll GitHub. Minimum 30000; 180000 (3 min) is the default. |
 | `staleAfterHours` | How long a PR sits unlooked-at before the Discord nudge goes stale. |
 | `quietAfterDays` | Optional. Days without activity after which another person's PR moves to "Gone quiet" on the Others' PRs tab. A positive number; defaults to 30. |
+| `sessions` | Optional. Links cards to local Claude Code sessions; off without it. See [Claude Code sessions](#claude-code-sessions). |
 
 The example file ships with placeholders in angle brackets for the two fields that
 must be yours. The server refuses to start while any placeholder is left in place, and
@@ -202,7 +305,7 @@ Environment overrides, all optional:
 | --- | --- |
 | `PRD_CONFIG` | `config.json` |
 | `PRD_DB` | `pr-dashboard.db` |
-| `PORT` | `5174` (the API; the web port lives in `client/vite.config.ts`) |
+| `PORT` | `5174` (the API; the web port is `WEB_PORT` in `src/web-port.ts`) |
 
 ## Review escalation
 
@@ -232,8 +335,10 @@ src/
   claude/     tie-breaks the two ambiguous review shapes
   store/      SQLite: Discord stamps, cached verdicts, notification state
   notify/     macOS notifications via `osascript`
+  sessions/   Claude Code sessions: list them, match them to PRs (match.ts is pure)
   server/     Fastify routes, the poll loop, and demo mode
-client/src/   React board — App, Card, bucket labels and ordering
+client/src/   React board — App, Card, session rows, bucket labels and ordering
+skills/       the pr-attention Claude Code skill
 ```
 
 The seam worth knowing: `buildBoard()` in `src/server/poller.ts` is a pure function of
